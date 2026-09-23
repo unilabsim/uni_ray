@@ -24,6 +24,13 @@
   `mujoco.MjModel` exactly once on the cold path and produces the immutable
   `RaySceneDescription` plus mesh collision descriptor.
 
+## Correctness and performance evidence
+
+[docs/conformance.md](docs/conformance.md) records the conformance sweep against
+`mujoco.mj_ray` (primitives and static meshes), the pinned known-semantics
+resolutions, the hot-path audit approach, and segmented CPU/GPU timings from
+`benchmarks/bench_mjbatch.py`.
+
 ## Installation
 
 The package depends on `unisim-core` (the ray-query contract) and NumPy.
