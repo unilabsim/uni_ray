@@ -218,6 +218,11 @@ class WarpRayCaster(RayCaster):
         cylindrical = (geom_types == 3) | (geom_types == 5)
         geom_sizes[cylindrical, 2] = geom_sizes[cylindrical, 1]
         geom_sizes[cylindrical, 1] = geom_sizes[cylindrical, 0]
+        # The contract plane is the infinite local z = 0 plane and ignores
+        # sizes; zero them so a descriptor carrying a rendering-grid size is
+        # still treated as infinite (the AABB kernel substitutes a large
+        # finite half extent for the broad phase).
+        geom_sizes[geom_types == 0] = 0.0
         aabb_center, aabb_size = self._local_aabbs(scene, collision)
         geom_local_quat_xyzw = scene.geom_local_quat[:, _WXYZ_TO_XYZW].astype(np.float32)
 

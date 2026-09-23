@@ -1,11 +1,21 @@
-# Analytic ray-primitive intersection functions, copied verbatim from
-# MuJoCo-LiDAR (https://github.com/discoverse-dev/MuJoCo-LiDAR),
+# Analytic ray-primitive intersection functions, copied from MuJoCo-LiDAR
+# (https://github.com/discoverse-dev/MuJoCo-LiDAR),
 # src/mujoco_lidar/core_warp/geometry.py.
 # Copyright (c) 2025 Yufei Jia, MIT License. See NOTICE.
 #
 # Size convention note: cylinder/capsule expect the half height at size[2]
 # (not MuJoCo's size[1]); the caster performs that swap when building its
 # internal device descriptor, exactly like MjLidarWarp does at init.
+#
+# Deliberate deviations from the source (pinned by
+# tests/test_known_semantics.py), all made to match mujoco.mj_ray semantics:
+#   * rays originating inside a primitive return the forward exit distance
+#     (sphere/box/ellipsoid use the far root instead of 0.0; the cylinder
+#     side/cap loops already evaluate both roots);
+#   * the capsule is intersected as the cylinder side plus cap spheres
+#     restricted to their exposed hemispheres (|z| >= half_height), instead of
+#     reusing ray_cylinder_distance's flat caps (interior planes of a capsule)
+#     and unclamped sphere roots.
 import warp as wp
 
 
@@ -29,7 +39,8 @@ def ray_sphere_distance(ray_origin: wp.vec3, ray_dir: wp.vec3, center: wp.vec3, 
         if t0 >= 0.0:
             t = t0
         elif t1 >= 0.0:
-            t = 0.0
+            # Inside-origin rays report the forward exit distance (mj_ray).
+            t = t1
     return t
 
 
@@ -86,7 +97,8 @@ def ray_box_distance(
 
     t = -1.0
     if valid and t_enter <= t_exit and t_exit >= 0.0:
-        t = t_enter if t_enter >= 0.0 else 0.0
+        # Inside-origin rays report the forward exit distance (mj_ray).
+        t = t_enter if t_enter >= 0.0 else t_exit
     return t
 
 
@@ -168,7 +180,8 @@ def ray_ellipsoid_distance(
         if t0 >= 0.0:
             t = t0
         elif t1 >= 0.0:
-            t = 0.0
+            # Inside-origin rays report the forward exit distance (mj_ray).
+            t = t1
     return t
 
 
@@ -180,21 +193,56 @@ def ray_capsule_distance(
     size: wp.vec3,
     rot: wp.mat33,
 ):
+    # Deviation from upstream: the capsule is intersected as the cylinder side
+    # plus the two cap spheres restricted to their exposed hemispheres
+    # (|z| >= half_height). The upstream version reused ray_cylinder_distance,
+    # whose flat caps are interior planes of the capsule (never surfaces), and
+    # took the cap spheres' near roots unclamped, which reports interior
+    # points for inside-origin rays; this version matches mujoco.mj_ray.
     ro, rd = transform_ray_to_local(ray_origin, ray_dir, center, rot)
     radius = size[0]
     half_height = size[2]
-    best = ray_cylinder_distance(ray_origin, ray_dir, center, size, rot)
-    if best < 0.0:
-        best = 1.0e20
+    best = 1.0e20
 
-    bottom = wp.vec3(0.0, 0.0, -half_height)
-    top = wp.vec3(0.0, 0.0, half_height)
-    t0 = ray_sphere_distance(ro, rd, bottom, radius)
-    t1 = ray_sphere_distance(ro, rd, top, radius)
-    if t0 >= 0.0 and t0 < best:
-        best = t0
-    if t1 >= 0.0 and t1 < best:
-        best = t1
+    a = rd[0] * rd[0] + rd[1] * rd[1]
+    if a > 1.0e-8:
+        b = 2.0 * (ro[0] * rd[0] + ro[1] * rd[1])
+        c = ro[0] * ro[0] + ro[1] * ro[1] - radius * radius
+        disc = b * b - 4.0 * a * c
+        if disc >= 0.0:
+            root = wp.sqrt(disc)
+            for sign in range(2):
+                s = -1.0
+                if sign == 1:
+                    s = 1.0
+                t = (-b + s * root) / (2.0 * a)
+                z = ro[2] + t * rd[2]
+                if t >= 0.0 and wp.abs(z) <= half_height and t < best:
+                    best = t
+
+    for cap in range(2):
+        cap_z = -half_height
+        if cap == 1:
+            cap_z = half_height
+        oc = wp.vec3(ro[0], ro[1], ro[2] - cap_z)
+        b = wp.dot(oc, rd)
+        c = wp.dot(oc, oc) - radius * radius
+        disc = b * b - c
+        if disc >= 0.0:
+            root = wp.sqrt(disc)
+            for sign in range(2):
+                s = -1.0
+                if sign == 1:
+                    s = 1.0
+                t = -b + s * root
+                z = ro[2] + t * rd[2]
+                if cap == 1:
+                    exposed = z >= half_height
+                else:
+                    exposed = z <= -half_height
+                if t >= 0.0 and exposed and t < best:
+                    best = t
+
     if best == 1.0e20:
         best = -1.0
     return best
