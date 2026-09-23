@@ -18,7 +18,9 @@ import sys
 class _Blocker:
     def find_spec(self, name, path=None, target=None):
         if name.split(".")[0] in {"warp", "mujoco"}:
-            raise ImportError(f"blocked optional import: {name}")
+            # Mirrors a genuinely missing package (ModuleNotFoundError), which
+            # is also what pytest.importorskip keys on.
+            raise ModuleNotFoundError(f"No module named '{name.split('.')[0]}'")
         return None
 
 
