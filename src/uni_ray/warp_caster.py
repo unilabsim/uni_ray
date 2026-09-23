@@ -15,6 +15,7 @@ and ``geom_id`` are views into caster-owned host buffers that the next
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
@@ -34,6 +35,9 @@ from .kernels import (
     update_aabbs_batch_kernel,
     write_body_poses_kernel,
 )
+
+if TYPE_CHECKING:
+    from .mjbatch import MjBatchCollision
 
 # Kernel dispatch codes follow the MuJoCo mjtGeom numbering used by the copied
 # MuJoCo-LiDAR kernels (0=plane, 2=sphere, 3=capsule, 4=ellipsoid, 5=cylinder,
@@ -85,6 +89,7 @@ class WarpRayCaster(RayCaster):
         num_envs: int = 1,
         num_rays: int = 1,
         *,
+        collision: MjBatchCollision | None = None,
         device: str | None = None,
     ) -> None:
         for name, value in (("num_envs", num_envs), ("num_rays", num_rays)):
@@ -94,6 +99,7 @@ class WarpRayCaster(RayCaster):
                 raise ValueError(f"{name} must be positive")
         self._num_envs = num_envs
         self._num_rays = num_rays
+        self._collision = collision
         wp.init()
         self._device = device if device is not None else _default_device()
 
@@ -110,7 +116,9 @@ class WarpRayCaster(RayCaster):
         self._ray_directions_host_wp = wp.array(
             self._ray_directions_host, dtype=wp.vec3, device="cpu", copy=False
         )
-        self._env_map_host_wp = wp.array(self._env_map_host, dtype=wp.int32, device="cpu", copy=False)
+        self._env_map_host_wp = wp.array(
+            self._env_map_host, dtype=wp.int32, device="cpu", copy=False
+        )
         self._ray_origins_dev = wp.zeros((num_envs, num_rays), dtype=wp.vec3, device=self._device)
         self._ray_directions_dev = wp.zeros(
             (num_envs, num_rays), dtype=wp.vec3, device=self._device
@@ -171,12 +179,22 @@ class WarpRayCaster(RayCaster):
             raise BackendError("uni_ray caster is already materialized")
         if not isinstance(scene, RaySceneDescription):
             raise TypeError("scene must be a RaySceneDescription")
-        if RayGeomType.MESH in scene.geom_types:
+        collision = self._collision
+        if RayGeomType.MESH in scene.geom_types and collision is None:
             raise UnsupportedCapabilityError(
                 "uni_ray mesh support requires a collision descriptor built by "
                 "uni_ray.mjbatch.build_collision_description and passed as "
                 "create_ray_caster(..., collision=...)"
             )
+        if collision is not None:
+            if (
+                collision.scene.num_geoms != scene.num_geoms
+                or collision.scene.num_bodies != scene.num_bodies
+            ):
+                raise ValueError(
+                    "collision descriptor does not match the materialized scene; "
+                    "materialize the collision.scene of the descriptor passed at creation"
+                )
         for geom_type, size in zip(scene.geom_types, scene.geom_sizes):
             required = _POSITIVE_SIZE_DIMS.get(geom_type, ())
             if any(float(size[dim]) <= 0.0 for dim in required):
@@ -200,17 +218,30 @@ class WarpRayCaster(RayCaster):
         cylindrical = (geom_types == 3) | (geom_types == 5)
         geom_sizes[cylindrical, 2] = geom_sizes[cylindrical, 1]
         geom_sizes[cylindrical, 1] = geom_sizes[cylindrical, 0]
-        aabb_center, aabb_size = self._local_aabbs(scene)
+        aabb_center, aabb_size = self._local_aabbs(scene, collision)
         geom_local_quat_xyzw = scene.geom_local_quat[:, _WXYZ_TO_XYZW].astype(np.float32)
 
         self._geom_types_dev = wp.array(geom_types, dtype=wp.int32, device=device)
         self._geom_sizes_dev = wp.array(geom_sizes, dtype=wp.vec3, device=device)
         self._geom_aabb_center_dev = wp.array(aabb_center, dtype=wp.vec3, device=device)
         self._geom_aabb_size_dev = wp.array(aabb_size, dtype=wp.vec3, device=device)
-        self._geom_mesh_ids_dev = wp.array(
-            np.full(num_geoms, -1, dtype=np.int32), dtype=wp.int32, device=device
-        )
-        self._mesh_ids_dev = wp.array(np.zeros(0, dtype=np.uint64), dtype=wp.uint64, device=device)
+        if collision is not None and collision.meshes:
+            # wp.Mesh builds its internal BVH once here; meshes are static for
+            # the caster's lifetime (dynamic meshes are unsupported by design).
+            self._meshes = [
+                wp.Mesh(
+                    points=wp.array(mesh.points, dtype=wp.vec3, device=device),
+                    indices=wp.array(mesh.indices, dtype=wp.int32, device=device),
+                )
+                for mesh in collision.meshes
+            ]
+            mesh_ids = np.array([mesh.id for mesh in self._meshes], dtype=np.uint64)
+            geom_mesh_ids = collision.geom_mesh_ids.astype(np.int32)
+        else:
+            mesh_ids = np.zeros(0, dtype=np.uint64)
+            geom_mesh_ids = np.full(num_geoms, -1, dtype=np.int32)
+        self._geom_mesh_ids_dev = wp.array(geom_mesh_ids, dtype=wp.int32, device=device)
+        self._mesh_ids_dev = wp.array(mesh_ids, dtype=wp.uint64, device=device)
         self._geom_body_ids_dev = wp.array(
             scene.geom_body_ids.astype(np.int32), dtype=wp.int32, device=device
         )
@@ -413,7 +444,9 @@ class WarpRayCaster(RayCaster):
         )
 
     @staticmethod
-    def _local_aabbs(scene: RaySceneDescription) -> tuple[np.ndarray, np.ndarray]:
+    def _local_aabbs(
+        scene: RaySceneDescription, collision: MjBatchCollision | None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Local-frame AABB center/half extents per geom for the broad phase."""
         center = np.zeros((scene.num_geoms, 3), dtype=np.float32)
         size = np.zeros((scene.num_geoms, 3), dtype=np.float32)
@@ -427,6 +460,13 @@ class WarpRayCaster(RayCaster):
                 size[index] = (radius, radius, float(geom_size[1]))
             elif geom_type == RayGeomType.CAPSULE:
                 size[index] = (radius, radius, float(geom_size[1]) + radius)
+            elif geom_type == RayGeomType.MESH:
+                assert collision is not None
+                points = collision.meshes[int(collision.geom_mesh_ids[index])].points
+                lower = points.min(axis=0)
+                upper = points.max(axis=0)
+                center[index] = (lower + upper) * 0.5
+                size[index] = (upper - lower) * 0.5
             # Planes stay zero; update_aabbs_batch_kernel substitutes the
             # infinite-plane half extent from geom_sizes directly.
         return center, size
