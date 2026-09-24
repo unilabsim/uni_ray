@@ -35,6 +35,8 @@ mujoco = ["mujoco>=3.2.0"]
 # motrixsim-core publishes cp310-only wheels, so the extra is restricted to
 # Python 3.10 (use a dedicated 3.10 environment; see docs/backends.md).
 motrix = ["motrixsim-core==0.10.1; python_version == '3.10'"]
+# Point-cloud visualization example (examples/visualize_pointcloud.py).
+viz = ["viser"]
 
 [dependency-groups]
 # The dev group installs the optional runtimes so the full test suite runs
@@ -42,7 +44,15 @@ motrix = ["motrixsim-core==0.10.1; python_version == '3.10'"]
 # mujoco-warp serves the mjwarp adapter profile (uni_ray.mjwarp, #300) and
 # the benchmarks. motrixsim-core is NOT in the dev group: it ships cp310-only
 # wheels and would break resolution on newer Pythons (see the motrix extra).
-dev = ["pytest", "ruff", "mypy", "warp-lang>=1.11.0", "mujoco>=3.2.0", "mujoco-warp"]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "warp-lang>=1.11.0",
+    "mujoco>=3.2.0",
+    "mujoco-warp",
+    "viser",
+]
 
 [tool.uv.sources]
 # Local development against the sibling unisim checkout (ray-query contract).

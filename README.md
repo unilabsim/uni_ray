@@ -107,6 +107,23 @@ model.geom_size[geom_id] = [0.5, 0.4, 0.3]   # geom size / local pose / mesh edi
 rebuild_caster_from_model(caster, model)     # re-triangulates, re-uploads, rebuilds BVH
 ```
 
+## Examples
+
+`examples/visualize_pointcloud.py` renders the caster's world-frame hit-point
+cloud with [viser](https://github.com/nerfstudio-project/viser): a small scene
+(ground, hfield terrain, static mesh, and a freejoint body carrying
+sphere/box/capsule geoms) is traced by a spinning LiDAR-like ring fan per env,
+and each frame's hit points stream to the browser:
+
+```bash
+uv sync --extra warp --extra mujoco --extra viz
+uv run python examples/visualize_pointcloud.py --num-envs 4 --num-rays 512
+```
+
+Open the printed URL (http://localhost:8080 by default). `hit_point` is already
+world-frame (rays go in world-frame, `hit_point = origin + distance *
+direction`), so the demo only masks out misses.
+
 ## Development
 
 ```bash
