@@ -10,12 +10,17 @@ Results are returned through an explicit host readback. ``distance``, ``hit``,
 and ``geom_id`` are views into caster-owned host buffers that the next
 ``trace`` call reuses (callers retaining results across calls must copy them);
 ``hit_point`` and ``body_id`` are computed fresh on the host per call.
+
+The contract requires a second ``materialize`` to fail, so scene replacement
+(runtime geometry randomization, mesh/hfield replacement) goes through the
+explicit cold-path :meth:`WarpRayCaster.rebuild`, which re-binds an updated
+descriptor without recreating the caster and is never invoked by the hot
+path.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
@@ -35,9 +40,7 @@ from .kernels import (
     update_aabbs_batch_kernel,
     write_body_poses_kernel,
 )
-
-if TYPE_CHECKING:
-    from .mjbatch import MjBatchCollision
+from .mjbatch import MjBatchCollision
 
 # Kernel dispatch codes follow the MuJoCo mjtGeom numbering used by the copied
 # MuJoCo-LiDAR kernels (0=plane, 2=sphere, 3=capsule, 4=ellipsoid, 5=cylinder,
@@ -176,15 +179,60 @@ class WarpRayCaster(RayCaster):
     def materialize(self, scene: RaySceneDescription) -> None:
         self._require_open()
         if self._scene is not None:
-            raise BackendError("uni_ray caster is already materialized")
+            raise BackendError(
+                "uni_ray caster is already materialized; use rebuild() to replace the scene"
+            )
         if not isinstance(scene, RaySceneDescription):
             raise TypeError("scene must be a RaySceneDescription")
-        collision = self._collision
+        self._bind_scene(scene, self._collision)
+
+    def rebuild(
+        self,
+        collision: MjBatchCollision | None = None,
+        *,
+        scene: RaySceneDescription | None = None,
+    ) -> None:
+        """Re-bind the scene geometry from an updated descriptor (cold path).
+
+        This is the explicit runtime-geometry-randomization path: pass a
+        freshly built ``collision`` descriptor (e.g. from
+        ``uni_ray.mjbatch.build_collision_description`` on an updated MjModel,
+        or the ``uni_ray.mjbatch.rebuild_caster_from_model`` convenience) to
+        replace geom sizes/local poses and mesh/hfield data, or pass a bare
+        ``scene`` to change geom sizes/local poses while reusing the mesh
+        data of the descriptor already bound to this caster. Exactly one of
+        ``collision``/``scene`` must be given.
+
+        Cold-path semantics: all scene-dependent device arrays, wp.Mesh
+        objects, and the BVH are reallocated/rebuilt (``num_bodies`` and
+        ``num_geoms`` may change); buffers keyed to the fixed
+        ``(num_envs, num_rays)`` batch are untouched. As after
+        ``materialize``, every body pose is the identity until
+        ``update_pose`` writes it. ``update_pose``/``trace`` never call this
+        method; the hot path only accepts body poses.
+        """
+        self._require_open()
+        self._require_materialized()
+        if (collision is None) == (scene is None):
+            raise ValueError("rebuild takes exactly one of collision= or scene=")
+        if collision is not None:
+            if not isinstance(collision, MjBatchCollision):
+                raise TypeError("collision must be an MjBatchCollision")
+            self._collision = collision
+            self._bind_scene(collision.scene, collision)
+        else:
+            assert scene is not None
+            if not isinstance(scene, RaySceneDescription):
+                raise TypeError("scene must be a RaySceneDescription")
+            self._bind_scene(scene, self._collision)
+
+    def _bind_scene(self, scene: RaySceneDescription, collision: MjBatchCollision | None) -> None:
+        """(Re)allocate all scene-dependent state; cold path only."""
         if RayGeomType.MESH in scene.geom_types and collision is None:
             raise UnsupportedCapabilityError(
                 "uni_ray mesh support requires a collision descriptor built by "
                 "uni_ray.mjbatch.build_collision_description and passed as "
-                "create_ray_caster(..., collision=...)"
+                "create_ray_caster(..., collision=...) or rebuild(collision=...)"
             )
         if collision is not None:
             if (
@@ -192,8 +240,9 @@ class WarpRayCaster(RayCaster):
                 or collision.scene.num_bodies != scene.num_bodies
             ):
                 raise ValueError(
-                    "collision descriptor does not match the materialized scene; "
-                    "materialize the collision.scene of the descriptor passed at creation"
+                    "collision descriptor does not match the bound scene; bind the "
+                    "collision.scene of the descriptor the caster was created or "
+                    "rebuilt with"
                 )
         for geom_type, size in zip(scene.geom_types, scene.geom_sizes):
             required = _POSITIVE_SIZE_DIMS.get(geom_type, ())
@@ -231,8 +280,9 @@ class WarpRayCaster(RayCaster):
         self._geom_aabb_center_dev = wp.array(aabb_center, dtype=wp.vec3, device=device)
         self._geom_aabb_size_dev = wp.array(aabb_size, dtype=wp.vec3, device=device)
         if collision is not None and collision.meshes:
-            # wp.Mesh builds its internal BVH once here; meshes are static for
-            # the caster's lifetime (dynamic meshes are unsupported by design).
+            # wp.Mesh builds its internal BVH once here; meshes are static
+            # until the next materialize/rebuild rebinds them (per-frame
+            # vertex streaming is unsupported by design).
             self._meshes = [
                 wp.Mesh(
                     points=wp.array(mesh.points, dtype=wp.vec3, device=device),

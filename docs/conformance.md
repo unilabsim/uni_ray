@@ -77,8 +77,50 @@ per call), empty selections, and zero-geom scenes (all-miss).
   constructed exactly once at materialize (and `wp.Mesh` once per unique
   mesh); spies on `wp.array`/`wp.zeros`/`wp.empty`/`wp.full`/`wp.Bvh`/
   `wp.Mesh` count **zero** calls across 25 `update_pose` + `trace`
-  iterations after warmup. Bounded per-call host-side NumPy work (input
-  validation/staging, `hit_point`/`body_id` computation) is by design.
+  iterations after warmup, and a spy on `WarpRayCaster.rebuild` proves the
+  hot path never invokes the cold-path rebuild. Bounded per-call host-side
+  NumPy work (input validation/staging, `hit_point`/`body_id` computation)
+  is by design.
+
+## Hfield support (#2)
+
+Hfield geoms are triangulated once at descriptor build
+(`uni_ray.mjbatch._triangulate_hfield`, top surface ported from
+MuJoCo-LiDAR's `_build_hfield_mesh`) and bound as static meshes, so the
+runtime geom-pose transform applies unchanged. The port is extended into the
+exact closed solid `mj_rayHfield` intersects (mujoco 3.14
+`src/engine/engine_ray.c`): the top surface grid (`z = elevation * z_scale`,
+same per-cell diagonal as the engine), the four skirt walls of the elevation
+box clipped below the boundary surface line (z from 0 up to the edge
+heights), and the full base box (z in `[-base_depth, 0]`, including the
+interior-facing top at z = 0, replicating the engine's base-box hit for
+inside-base rays). MuJoCo's XML parser stores `hfield_data` with the first
+elevation text row at +y; the triangulation reads the compiled
+`hfield_data` exactly as the engine does.
+
+`tests/test_hfield.py` sweeps 512 rays in three families — from above, from
+the sides at all heights (skirt walls), and from below the base (bottom
+face) — against `mujoco.mj_ray`: **zero hit-mask mismatches, worst |dt|
+6.0e-07** at the shared `ATOL = 1e-4` (a 20k-ray exploratory sweep over a
+second terrain peaked at 8.5e-06). A second test attaches the hfield geom to
+a freejoint body and verifies pose sync on both env rows. Because the
+triangulation matches the engine's solid, the tolerance is the float32
+device tolerance, not an approximation budget.
+
+## Explicit rebuild path (#2)
+
+The contract requires a second `materialize` to fail, so scene replacement
+goes through `WarpRayCaster.rebuild(collision=... | scene=...)`, with
+`uni_ray.mjbatch.rebuild_caster_from_model(caster, mj_model)` as the
+MjModel convenience. Cold-path semantics: all scene-dependent device arrays,
+wp.Mesh objects, and the BVH are reallocated/rebuilt (`num_bodies` and
+`num_geoms` may change); the fixed `(num_envs, num_rays)` batch buffers are
+untouched, and body poses reset to identity. `tests/test_rebuild.py` pins:
+geom size/local-pose randomization tracked against `mj_ray` on the mutated
+model (`ATOL = 1e-4`), mesh replacement plus scene shape change,
+scene-only rebuild reusing the bound descriptor's mesh data, identity-pose
+reset, and the validation surface (exactly-one-of, materialized-first,
+closed, descriptor mismatch, wrong caster type).
 
 ## Segmented timings
 
@@ -128,9 +170,10 @@ and import-boundary tests always run.
   primitive sweep (tolerance 1e-4).
 - Normals are not computed (`supports_normal = False`); requesting them
   fails closed.
-- Hfield geoms, runtime geometry randomization, and dynamic meshes fail
-  closed at descriptor build / materialize time.
-- Meshes are static for the caster's lifetime (wp.Mesh internal BVH built
-  once at materialize).
+- Per-frame dynamic meshes (vertex streaming without a rebuild) fail closed;
+  mesh/hfield data changes require the explicit cold-path rebuild.
+- Hfield ray hits match `mj_rayHfield`'s solid model, which includes the
+  base box and skirt walls; terrain rendered top-surface-only elsewhere may
+  differ below the boundary surface line.
 - The default device is `cuda:0` when a CUDA device is present, else `cpu`;
   both paths are exercised (GPU for the full suite, CPU verified separately).

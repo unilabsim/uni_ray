@@ -19,6 +19,7 @@ wp = pytest.importorskip("warp", reason="warp-lang is required for the hot-path 
 
 import uni_ray  # noqa: E402
 from uni_ray.mjbatch import build_collision_description  # noqa: E402
+from uni_ray.warp_caster import WarpRayCaster  # noqa: E402
 
 AUDIT_XML = """
 <mujoco>
@@ -78,6 +79,8 @@ def test_no_new_warp_allocations_or_bvh_mesh_rebuilds(monkeypatch) -> None:
     mesh_spy = _Spy(wp.Mesh)
     monkeypatch.setattr(wp, "Bvh", bvh_spy)
     monkeypatch.setattr(wp, "Mesh", mesh_spy)
+    rebuild_spy = _Spy(WarpRayCaster.rebuild)
+    monkeypatch.setattr(WarpRayCaster, "rebuild", rebuild_spy)
 
     # Cold path: exactly one BVH and one wp.Mesh (the single tet mesh).
     caster, data = _make_caster()
@@ -92,6 +95,7 @@ def test_no_new_warp_allocations_or_bvh_mesh_rebuilds(monkeypatch) -> None:
     _drive_hot_path(caster, data, iterations=25)
     for name, spy in {**spies, "Bvh": bvh_spy, "Mesh": mesh_spy}.items():
         assert spy.calls == 0, f"hot path called wp.{name} {spy.calls} times"
+    assert rebuild_spy.calls == 0, "hot path invoked the cold-path rebuild"
     caster.close()
 
 

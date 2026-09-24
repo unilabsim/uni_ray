@@ -15,9 +15,16 @@
   refits the BVH; the hot path never parses XML, resolves names, or touches
   `mujoco.MjData`.
 - Geometry: analytic primitives (plane, sphere, box, cylinder, capsule,
-  ellipsoid) and static meshes (`wp.Mesh` with its internal BVH). Height
-  fields, runtime geometry randomization, and dynamic meshes fail closed with
+  ellipsoid), static meshes (`wp.Mesh` with its internal BVH), and height
+  fields — hfield geoms are triangulated once on the cold path into the
+  closed solid `mujoco.mj_ray` intersects (top surface, skirt walls, base
+  box) and bound as static meshes. Per-frame dynamic meshes fail closed with
   a clear unsupported-capability error.
+- Explicit cold-path rebuild: `WarpRayCaster.rebuild(...)` (or the
+  `uni_ray.mjbatch.rebuild_caster_from_model` convenience) re-binds geom
+  sizes/local poses and mesh/hfield data from an updated descriptor or
+  MjModel without recreating the caster, so runtime geometry randomization
+  is usable; the hot path keeps its body-pose-only contract.
 - Results come back through explicit host readback into persistent NumPy
   buffers; there is intentionally no zero-copy/device-output claim.
 - `uni_ray.mjbatch.build_collision_description(mj_model)` reads a
@@ -76,6 +83,17 @@ caster = create_ray_caster("uni_ray", num_envs=4, num_rays=64, collision=collisi
 `distance`, `hit`, and `geom_id` result arrays are views into caster-owned
 host buffers reused by the next `trace` call; copy them if you retain results
 across calls. `hit_point` and `body_id` are freshly computed per call.
+
+To randomize geometry between episodes without recreating the caster, mutate
+the model and rebuild on the cold path (poses reset to identity, so call
+`update_pose` again before tracing):
+
+```python
+from uni_ray.mjbatch import rebuild_caster_from_model
+
+model.geom_size[geom_id] = [0.5, 0.4, 0.3]   # geom size / local pose / mesh edits
+rebuild_caster_from_model(caster, model)     # re-triangulates, re-uploads, rebuilds BVH
+```
 
 ## Development
 
