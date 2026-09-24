@@ -31,12 +31,17 @@ classifiers = [
 warp = ["warp-lang>=1.11.0"]
 # Cold-path MuJoCo MjModel parsing for the mjbatch descriptor builder.
 mujoco = ["mujoco>=3.2.0"]
+# Cold-path MotrixSim scene parsing for the motrix descriptor builder.
+# motrixsim-core publishes cp310-only wheels, so the extra is restricted to
+# Python 3.10 (use a dedicated 3.10 environment; see docs/backends.md).
+motrix = ["motrixsim-core==0.10.1; python_version == '3.10'"]
 
 [dependency-groups]
 # The dev group installs the optional runtimes so the full test suite runs
 # with a plain `uv sync`; they stay optional for downstream consumers.
-# mujoco-warp is benchmark-only (benchmarks/bench_vs_mjwarp.py); uni_ray never
-# imports it.
+# mujoco-warp serves the mjwarp adapter profile (uni_ray.mjwarp, #300) and
+# the benchmarks. motrixsim-core is NOT in the dev group: it ships cp310-only
+# wheels and would break resolution on newer Pythons (see the motrix extra).
 dev = ["pytest", "ruff", "mypy", "warp-lang>=1.11.0", "mujoco>=3.2.0", "mujoco-warp"]
 
 [tool.uv.sources]

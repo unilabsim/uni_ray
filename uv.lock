@@ -9,8 +9,24 @@ resolution-markers = [
 
 [[package]]
 name = "absl-py"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.11'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7a/8f/fc001b92ecc467cc32ab38398bd0bfb45df46e7523bf33c2ad22a505f06e/absl-py-2.1.0.tar.gz", hash = "sha256:7820790efbb316739cde8b4e19357243fc3608a152024288513dd968d7d959ff", size = 118055, upload-time = "2024-01-16T22:14:26.154Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a2/ad/e0d3c824784ff121c03cc031f944bc7e139a8f1870ffd2845cc2dd76f6c4/absl_py-2.1.0-py3-none-any.whl", hash = "sha256:526a04eadab8b4ee719ce68f204172ead1027549089702d99b9059f129ff1308", size = 133706, upload-time = "2024-01-16T22:14:24.055Z" },
+]
+
+[[package]]
+name = "absl-py"
 version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12'",
+    "python_full_version == '3.11.*'",
+]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/4f/d79676ab82f2e42fc3611618139f13a9c4c31d0cff4b486982047679a802/absl_py-2.5.0.tar.gz", hash = "sha256:0c996f25c0490700fadabe6351630f6111534fa0ae252cc6d2014ea3b141135f", size = 118119, upload-time = "2026-07-03T10:57:48.157Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/0a/a10b45aab35b175aded078a462dc8d0c698f5b13946e7cb0869097b78bb6/absl_py-2.5.0-py3-none-any.whl", hash = "sha256:0f17b89f2a4eaaedc4f28c622998aa690564b3012a396a4ffad0821007fe03ba", size = 137410, upload-time = "2026-07-03T10:57:46.735Z" },
@@ -233,11 +249,39 @@ wheels = [
 ]
 
 [[package]]
+name = "motrixsim-core"
+version = "0.10.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py", version = "2.1.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/13/5aacc370c2aa951a34587549625d4776c84d30d0ef1f1da555ef6a51923c/motrixsim_core-0.10.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:d12fba015f1ce890e0a07daa6c9d24730805dfb27916f3603779186294358150", size = 58730585, upload-time = "2026-09-18T16:26:14.933Z" },
+    { url = "https://files.pythonhosted.org/packages/07/3d/c4d41be2de374a73aa1c1cde2a8df5b1225b204a83e4ab7f52fe095a69c7/motrixsim_core-0.10.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:acce59249576d724160756383632bc8af522beac337d6b41ccea0b521f972841", size = 69500031, upload-time = "2026-09-18T16:29:59.37Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/b4/186e83b3d89b3818aaccefd62690b77d6914370097fd5645dbc1f4d3d92a/motrixsim_core-0.10.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1a16c78a2a9a5a574de38af0cf3831b12c3f754eba2be8474046434884a14b34", size = 66696962, upload-time = "2026-09-18T16:29:41.349Z" },
+    { url = "https://files.pythonhosted.org/packages/17/be/95c65ea4484597c7575f4d44f6cd006bd6212d079c09a9335675749aa2c3/motrixsim_core-0.10.1-cp310-cp310-win_amd64.whl", hash = "sha256:da609700990970bd304e07cb8e9072ed4e98c986e07da103aac6b8f3507bba43", size = 50656529, upload-time = "2026-09-18T16:28:49.685Z" },
+    { url = "https://files.pythonhosted.org/packages/73/5a/85b89afdb2e1c3adc6ff6f1d10874088739087b8e7ecf42bef00699d7180/motrixsim_core-0.10.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:3149c4073b456a6cb8e2dbce39d3a1b4d70b95da7c11bae7cfc8b8e1fdc35386", size = 58731259, upload-time = "2026-09-18T16:27:58.5Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/83/900092f8a9e7c8b4ff88ff7bf86c2bc8e2643105bbb0e2f85839645b0f3e/motrixsim_core-0.10.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:078dfd9f618474e1708fb86694faf1122373b17b393b1cffb7c84daf3cf0edb4", size = 69501226, upload-time = "2026-09-18T16:27:26.247Z" },
+    { url = "https://files.pythonhosted.org/packages/39/2d/6eb9fb28a9a3117724f8cb948ea372fdd2f89d6b1b2f4662be54629a90bd/motrixsim_core-0.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7c6175bc165025efeaeb34b4c76163793b7184a5fea1d24b480a842c257e58e9", size = 66701167, upload-time = "2026-09-18T16:30:17.576Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/71/817d5721250f6242263307a5a1149b710aef6af1d25399f9320aad54efb6/motrixsim_core-0.10.1-cp311-cp311-win_amd64.whl", hash = "sha256:15fd847e567677afe8713317b5a660f9d26b6a1f1157f57a7adcfa5d21af7173", size = 50653220, upload-time = "2026-09-18T16:29:05.126Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/95/0e298da88c4887f9e7d3ca02351fb862c098b0f8f7870a87a13a18359db3/motrixsim_core-0.10.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:52b02f9a28b0b4fe3cff1d2509f8a3244f042656a7927aeb70495186d925c041", size = 58697017, upload-time = "2026-09-18T16:28:32.372Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/c6/dc3274f0917a5554473c2c4d6c95996184139c73d6491963569fa6dbcd44/motrixsim_core-0.10.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2917d0e8f52927dee5528ebc122f66e0a65f00bee7b27231aee6a4cb09278643", size = 69507661, upload-time = "2026-09-18T16:28:16.719Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/12/bbd8505b27aa2416d3acf987c5b059caf73d78714474934deee138ae0f57/motrixsim_core-0.10.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:614a08b544729f358fb8f4e1b7e9cd750e7810ec47aecc3454ff5f2c36d90cc6", size = 66723817, upload-time = "2026-09-18T16:26:50.839Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/41/04629d7096448caf1ea65c0b82b3fed49116296b63f0045b16a58d1bf935/motrixsim_core-0.10.1-cp312-cp312-win_amd64.whl", hash = "sha256:f8a5dcb0695afd4e31abb83ff63aeb8c82acfcf7dd567c926ae30fd9d862bbc6", size = 50665263, upload-time = "2026-09-18T16:29:22.762Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/7d/b8900552d9c7d81387e80862bd5edd5d86398bf6449cd5a94de8d7ed5e05/motrixsim_core-0.10.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6856d47dde407f64ddaea180a447d13144e6186e476ac23d90dfbd9a54d8df0a", size = 58697497, upload-time = "2026-09-18T16:27:08.133Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/27/1cba9fef3a45a6c827efa453627733aff408b763d0aae5587fe1ffe2c536/motrixsim_core-0.10.1-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ebf2ed5f07c1e8804700383bee3936d8c91f0b56f46a2b756f5cb72896cc3e56", size = 69509267, upload-time = "2026-09-18T16:25:58.542Z" },
+    { url = "https://files.pythonhosted.org/packages/38/cd/3957b90ab104b138381a6e7e9959d291ff0884ad70abeebef32d6c277efc/motrixsim_core-0.10.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8ae4bff1ea808cfe42410b813eda58ddffff7e052cc0ac4fc07a0190eddb809c", size = 66721878, upload-time = "2026-09-18T16:26:34.175Z" },
+    { url = "https://files.pythonhosted.org/packages/35/99/a958b8ee056fc405743cc53a4f4c5653c25d5cb733db76da643843b66bd1/motrixsim_core-0.10.1-cp313-cp313-win_amd64.whl", hash = "sha256:f85afd967b853b848a3d6fcead4e0879c933b573b4340f7281be2ce1e0949e15", size = 50662519, upload-time = "2026-09-18T16:27:40.491Z" },
+]
+
+[[package]]
 name = "mujoco"
 version = "3.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "absl-py" },
+    { name = "absl-py", version = "2.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "absl-py", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "etils", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version < '3.11'" },
     { name = "etils", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version >= '3.11'" },
     { name = "glfw" },
@@ -273,7 +317,8 @@ name = "mujoco-warp"
 version = "3.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "absl-py" },
+    { name = "absl-py", version = "2.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "absl-py", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "etils", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version < '3.11'" },
     { name = "etils", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version >= '3.11'" },
     { name = "mujoco" },
@@ -641,6 +686,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+motrix = [
+    { name = "motrixsim-core", marker = "python_full_version < '3.11'" },
+]
 mujoco = [
     { name = "mujoco" },
 ]
@@ -660,12 +708,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "motrixsim-core", marker = "python_full_version == '3.10.*' and extra == 'motrix'", specifier = "==0.10.1" },
     { name = "mujoco", marker = "extra == 'mujoco'", specifier = ">=3.2.0" },
     { name = "numpy" },
     { name = "unisim-core", editable = "../unisim" },
     { name = "warp-lang", marker = "extra == 'warp'", specifier = ">=1.11.0" },
 ]
-provides-extras = ["warp", "mujoco"]
+provides-extras = ["warp", "mujoco", "motrix"]
 
 [package.metadata.requires-dev]
 dev = [

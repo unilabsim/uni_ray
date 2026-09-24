@@ -36,6 +36,11 @@
   (build + bind) and `rebuild_caster_from_mjwarp` conveniences — see
   [docs/backends.md](docs/backends.md) for usage and the pose-sync vs
   device-pose boundary evaluation.
+- motrix profile (#301): `uni_ray.motrix.build_collision_description` sources
+  the same descriptor from a `motrixsim.SceneModel` (pose-sync profile), with
+  a full capability audit (exact/approximate/unsupported per geometry kind)
+  in [docs/backends.md](docs/backends.md). `motrixsim-core` ships cp310-only
+  wheels — install the `motrix` extra in a Python 3.10 environment.
 
 ## Correctness and performance evidence
 

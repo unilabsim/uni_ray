@@ -44,6 +44,23 @@ class _Blocker:
 sys.meta_path.insert(0, _Blocker())
 """
 
+# Variant that blocks only motrixsim (#301): the motrix adapter module must
+# import and fail closed without it, and uni_ray/factory discovery must be
+# unaffected.
+BLOCKER_MOTRIX = """
+import sys
+
+
+class _Blocker:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in {"motrixsim"}:
+            raise ModuleNotFoundError(f"No module named '{name.split('.')[0]}'")
+        return None
+
+
+sys.meta_path.insert(0, _Blocker())
+"""
+
 
 def _run(code: str, blocker: str = BLOCKER) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -174,3 +191,47 @@ def test_mjwarp_builder_fails_closed_without_mujoco_warp() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "mjwarp-fail-closed-ok" in result.stdout
+
+
+def test_motrix_module_imports_and_factory_works_without_motrixsim() -> None:
+    result = _run(
+        """
+        import sys
+
+        import uni_ray
+        import uni_ray.motrix
+
+        assert "motrixsim" not in sys.modules
+        from unisim.factory import create_ray_caster
+
+        caster = create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+        caster.close()
+        print("import-and-factory-ok")
+        """,
+        blocker=BLOCKER_MOTRIX,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "import-and-factory-ok" in result.stdout
+
+
+def test_motrix_builder_fails_closed_without_motrixsim() -> None:
+    result = _run(
+        """
+        from unisim.optional import OptionalDependencyError
+
+        from uni_ray.motrix import build_collision_description
+
+        try:
+            build_collision_description(object())
+        except OptionalDependencyError as error:
+            assert "motrixsim-core" in str(error), str(error)
+            print("motrix-fail-closed-ok")
+        else:
+            raise AssertionError(
+                "motrix build_collision_description should fail closed without motrixsim"
+            )
+        """,
+        blocker=BLOCKER_MOTRIX,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "motrix-fail-closed-ok" in result.stdout
