@@ -35,7 +35,9 @@ mujoco = ["mujoco>=3.2.0"]
 [dependency-groups]
 # The dev group installs the optional runtimes so the full test suite runs
 # with a plain `uv sync`; they stay optional for downstream consumers.
-dev = ["pytest", "ruff", "mypy", "warp-lang>=1.11.0", "mujoco>=3.2.0"]
+# mujoco-warp is benchmark-only (benchmarks/bench_vs_mjwarp.py); uni_ray never
+# imports it.
+dev = ["pytest", "ruff", "mypy", "warp-lang>=1.11.0", "mujoco>=3.2.0", "mujoco-warp"]
 
 [tool.uv.sources]
 # Local development against the sibling unisim checkout (ray-query contract).

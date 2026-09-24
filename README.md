@@ -30,6 +30,9 @@
 `mujoco.mj_ray` (primitives and static meshes), the pinned known-semantics
 resolutions, the hot-path audit approach, and segmented CPU/GPU timings from
 `benchmarks/bench_mjbatch.py`.
+[docs/benchmark-mjwarp.md](docs/benchmark-mjwarp.md) compares batch ray
+tracing against mujoco-warp's public `rays` API (brute-force and BVH modes)
+from `benchmarks/bench_vs_mjwarp.py`.
 
 ## Installation
 
