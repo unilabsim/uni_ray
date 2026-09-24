@@ -88,6 +88,51 @@ def _build_scene_xml() -> str:
     """
 
 
+def _hfield_xml(name: str, nrow: int, ncol: int, size: str, seed: int = 3) -> str:
+    """Deterministic non-flat elevation grid: smooth sinusoid base + noise,
+    normalized to [0, 1] (scaled by the hfield's z size at compile)."""
+    rng = np.random.default_rng(seed)
+    x = np.linspace(0.0, 2.0 * np.pi, ncol)
+    y = np.linspace(0.0, 2.0 * np.pi, nrow)
+    xx, yy = np.meshgrid(x, y)
+    elev = 0.3 * np.sin(xx) * np.cos(yy) + 0.2 * np.sin(2.0 * xx + yy)
+    elev += rng.uniform(-0.05, 0.05, (nrow, ncol))
+    elev -= elev.min()
+    elev /= elev.max()
+    rows = [" ".join(f"{v:.5f}" for v in row) for row in elev]
+    return (
+        f'<hfield name="{name}" nrow="{nrow}" ncol="{ncol}" size="{size}" '
+        f'elevation="{" ".join(rows)}"/>'
+    )
+
+
+def _build_hfield_scene_xml() -> str:
+    """33x33 hfield terrain (~2.2k triangulated triangles) + standard body."""
+    return f"""
+    <mujoco>
+      <asset>
+        {_uv_sphere_mesh_xml("ball", 0.5)}
+        {_hfield_xml("terrain", 33, 33, "4 4 0.8 0.2")}
+      </asset>
+      <worldbody>
+        <geom type="hfield" hfield="terrain"/>
+        <geom type="mesh" mesh="ball" pos="3 0 0.5"/>
+        <body pos="0 0 1.6">
+          <freejoint/>
+          <geom type="sphere" size="0.25" pos="0.45 0 0"/>
+          <geom type="box" size="0.15 0.2 0.1" pos="-0.45 0 0"/>
+          <geom type="capsule" size="0.08 0.25" pos="0 0.55 0" quat="0.7071068 0.7071068 0 0"/>
+          <geom type="cylinder" size="0.1 0.2" pos="0 -0.55 0"/>
+          <geom type="ellipsoid" size="0.12 0.2 0.07" pos="0 0 0.45"/>
+        </body>
+      </worldbody>
+    </mujoco>
+    """
+
+
+_SCENE_BUILDERS = {"standard": _build_scene_xml, "hfield": _build_hfield_scene_xml}
+
+
 def _segment_timer(device: str) -> Callable[[Callable[[], None]], float]:
     def time_segment(fn: Callable[[], None]) -> float:
         start = time.perf_counter()
@@ -202,14 +247,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default=None, help="warp device (default: cuda:0 if present)")
     parser.add_argument("--iters", type=int, default=100)
+    parser.add_argument("--scene", choices=sorted(_SCENE_BUILDERS), default="standard")
     args = parser.parse_args()
 
     import mujoco
 
-    model = mujoco.MjModel.from_xml_string(_build_scene_xml())
+    model = mujoco.MjModel.from_xml_string(_SCENE_BUILDERS[args.scene]())
     collision = build_collision_description(model)
 
-    print(f"device: {args.device or 'default'}  iters: {args.iters}")
+    print(f"device: {args.device or 'default'}  iters: {args.iters}  scene: {args.scene}")
     print(f"scene: {model.ngeom} geoms, {model.nbody} bodies, {len(collision.meshes)} mesh(es)")
     print()
     print("| num_envs | num_rays | pose upload (ms) | pose+AABB+refit (ms) | "

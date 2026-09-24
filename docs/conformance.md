@@ -105,7 +105,10 @@ face) — against `mujoco.mj_ray`: **zero hit-mask mismatches, worst |dt|
 second terrain peaked at 8.5e-06). A second test attaches the hfield geom to
 a freejoint body and verifies pose sync on both env rows. Because the
 triangulation matches the engine's solid, the tolerance is the float32
-device tolerance, not an approximation budget.
+device tolerance, not an approximation budget. Hfield throughput vs
+mujoco-warp is benchmarked in docs/benchmark-mjwarp.md (including the
+finding that mujoco-warp's BVH ray mode covers only the hfield top surface);
+the segmented hfield timings are in the table below.
 
 ## Explicit rebuild path (#2)
 
@@ -120,7 +123,10 @@ geom size/local-pose randomization tracked against `mj_ray` on the mutated
 model (`ATOL = 1e-4`), mesh replacement plus scene shape change,
 scene-only rebuild reusing the bound descriptor's mesh data, identity-pose
 reset, and the validation surface (exactly-one-of, materialized-first,
-closed, descriptor mismatch, wrong caster type).
+closed, descriptor mismatch, wrong caster type). Rebuild-path timings (full
+rebind with a changed mesh, scene-only randomization, post-rebuild trace
+parity, and an amortized rebuild-every-100-traces figure) are measured by
+`benchmarks/bench_rebuild.py` and recorded in docs/benchmark-mjwarp.md.
 
 ## Segmented timings
 
@@ -140,6 +146,16 @@ RTX 4090 (`--device cuda:0`, warp-lang 1.17.0):
 | 64 | 128 | 0.0240 | 0.0424 | 0.0429 | 0.0249 | 0.1061 | 0.2824 |
 | 256 | 512 | 0.0281 | 0.0461 | 0.0804 | 0.1130 | 0.1160 | 3.1778 |
 | 1024 | 512 | 0.0363 | 0.0450 | 0.1940 | 0.3545 | 0.1871 | 21.6006 |
+
+Hfield scene (`--scene hfield`: 33x33 elevation-grid hfield triangulated to
+~2.2k triangles + static mesh + the same primitive body; RTX 4090, 100
+iterations):
+
+| num_envs | num_rays | pose upload (ms) | pose+AABB+refit (ms) | intersection (ms) | host readback (ms) | update_pose total (ms) | trace total (ms) |
+|---|---|---|---|---|---|---|---|
+| 64 | 128 | 0.0383 | 0.0411 | 0.1304 | 0.0247 | 0.1083 | 0.3430 |
+| 256 | 512 | 0.0616 | 0.0441 | 0.3309 | 0.1112 | 0.1501 | 3.2817 |
+| 1024 | 512 | 0.0840 | 0.0630 | 1.0708 | 0.3357 | 0.1870 | 22.1494 |
 
 CPU device (`--device cpu`, 50 iterations):
 

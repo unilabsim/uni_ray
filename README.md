@@ -39,7 +39,8 @@ resolutions, the hot-path audit approach, and segmented CPU/GPU timings from
 `benchmarks/bench_mjbatch.py`.
 [docs/benchmark-mjwarp.md](docs/benchmark-mjwarp.md) compares batch ray
 tracing against mujoco-warp's public `rays` API (brute-force and BVH modes)
-from `benchmarks/bench_vs_mjwarp.py`.
+from `benchmarks/bench_vs_mjwarp.py`, and records the uni_ray-only
+rebuild-path timings from `benchmarks/bench_rebuild.py`.
 
 ## Installation
 

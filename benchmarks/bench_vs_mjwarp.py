@@ -11,6 +11,21 @@ batches, sweeping (num_envs x num_rays). mujoco-warp is measured in two modes:
   public ``refit_bvh`` so dynamic poses are reflected (same lifecycle as
   uni_ray's update_pose refit).
 
+Scenes (select with --scenes; all run by default):
+
+- standard: plane + static UV-sphere mesh + one freejoint body with five
+  primitive geoms (7 geoms total).
+- dense: 4x3 grid of freejoint bodies with four primitives each (50 geoms).
+- hfield: 33x33 elevation-grid hfield terrain (triangulated by uni_ray into a
+  closed solid: ~2.2k triangles) + static mesh + the standard primitive body.
+  mujoco-warp's BVH mode (RenderContext) only covers the hfield top surface —
+  side/base rays that uni_ray and the brute mode resolve against the closed
+  solid are missed — so the hfield scene times mujoco-warp in brute mode only;
+  the sanity check still reports the BVH divergence as a capability finding.
+- densemesh: 24 mesh geoms sharing one ~2208-triangle UV-sphere asset
+  (8 freejoint bodies x 3 geoms) + plane, exercising the mesh-heavy case for
+  both mujoco-warp modes and uni_ray's static-mesh BVH path.
+
 What is measured per iteration on each side (device work only, warp
 synchronize-scoped wall time, mean over --iters):
 
@@ -47,13 +62,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import time
+from collections.abc import Callable
 
 import mujoco
 import mujoco_warp as mjw
 import numpy as np
 import warp as wp
-from bench_mjbatch import _build_scene_xml, _run_profile, _uv_sphere_mesh_xml
+from bench_mjbatch import (
+    _build_hfield_scene_xml,
+    _build_scene_xml,
+    _run_profile,
+    _uv_sphere_mesh_xml,
+)
 from mujoco_warp._src.types import vec6
 from unisim.ray_query import RayTraceOutputs
 
@@ -107,6 +129,35 @@ def _build_dense_scene_xml(nx: int = 4, ny: int = 3) -> str:
     """
 
 
+def _build_dense_mesh_scene_xml(radius: float = 0.4, num_bodies: int = 8) -> str:
+    """Plane + a ring of freejoint bodies whose geoms are all meshes sharing
+    one ~2208-triangle UV-sphere asset (num_bodies x 3 mesh geoms)."""
+    bodies = []
+    for i in range(num_bodies):
+        angle = 2.0 * np.pi * i / num_bodies
+        x, y = 2.0 * np.cos(angle), 2.0 * np.sin(angle)
+        geoms = []
+        for n in range(3):
+            spin = (3 * i + n) * 0.9
+            quat = (np.cos(spin / 2), np.sin(spin / 2), 0.0, 0.0)
+            geoms.append(
+                f'<geom type="mesh" mesh="denseball" pos="{0.4 * (n - 1):.2f} 0 0" '
+                f'quat="{" ".join(f"{q:.6f}" for q in quat)}"/>'
+            )
+        bodies.append(f'<body pos="{x:.2f} {y:.2f} 1.2"><freejoint/>{"".join(geoms)}</body>')
+    return f"""
+    <mujoco>
+      <asset>
+        {_uv_sphere_mesh_xml("denseball", radius, nlat=24, nlon=48)}
+      </asset>
+      <worldbody>
+        <geom type="plane" size="0 0 0.1"/>
+        {"".join(bodies)}
+      </worldbody>
+    </mujoco>
+    """
+
+
 def _poses(rng: np.random.Generator, num_envs: int, num_bodies: int) -> tuple:
     body_pos = rng.normal(size=(num_envs, num_bodies, 3)) * 0.2
     body_pos[..., 2] += 1.2
@@ -123,6 +174,52 @@ def _rays(rng: np.random.Generator, num_rays: int) -> tuple:
     origins[:, 2] += 2.0
     directions = -origins / np.linalg.norm(origins, axis=1, keepdims=True)
     return origins, directions
+
+
+def _dense_mesh_rays(rng: np.random.Generator, num_rays: int) -> tuple:
+    """Rays that exercise the body ring: half straight down onto the ring,
+    half across the scene center through the meshes to the far side."""
+    angles = rng.uniform(0.0, 2.0 * np.pi, num_rays)
+    origins = np.zeros((num_rays, 3))
+    origins[:, 0] = 2.0 * np.cos(angles) + rng.normal(scale=0.2, size=num_rays)
+    origins[:, 1] = 2.0 * np.sin(angles) + rng.normal(scale=0.2, size=num_rays)
+    origins[:, 2] = rng.uniform(1.8, 3.0, num_rays)
+    directions = np.tile(np.array([[0.0, 0.0, -1.0]]), (num_rays, 1))
+    across = np.arange(num_rays) % 2 == 1
+    targets = -origins.copy()
+    targets[:, 2] = rng.uniform(0.0, 1.0, num_rays)
+    directions[across] = targets[across] - origins[across]
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    return origins, directions
+
+
+@dataclasses.dataclass(frozen=True)
+class _Scene:
+    key: str
+    label: str
+    xml_fn: Callable[[], str]
+    rays_fn: Callable[[np.random.Generator, int], tuple] = _rays
+    # False when the mujoco-warp RenderContext BVH does not cover the scene
+    # semantics (hfield: top surface only); brute is then the only timed mode.
+    mjwarp_bvh: bool = True
+
+
+_SCENES = (
+    _Scene("standard", "standard (7 geoms)", _build_scene_xml),
+    _Scene("dense", "dense (50 geoms)", _build_dense_scene_xml),
+    _Scene(
+        "hfield",
+        "hfield (33x33 terrain + static mesh + 5 primitives)",
+        _build_hfield_scene_xml,
+        mjwarp_bvh=False,
+    ),
+    _Scene(
+        "densemesh",
+        "dense mesh (24 x 2208-tri mesh geoms + plane)",
+        _build_dense_mesh_scene_xml,
+        rays_fn=_dense_mesh_rays,
+    ),
+)
 
 
 def _qpos_from_body_poses(body_pos: np.ndarray, body_quat: np.ndarray, nq: int) -> np.ndarray:
@@ -212,14 +309,14 @@ def _mean_ms(fn, device: str, iterations: int) -> float:
     return sum(_time(fn, device) for _ in range(iterations)) / iterations * 1e3
 
 
-def _sanity_check(scene_xml: str, device: str) -> None:
+def _sanity_check(scene: _Scene, device: str) -> None:
     """Verify uni_ray and mujoco-warp agree on identical inputs (small config)."""
     num_envs, num_rays = 8, 64
-    mjm = mujoco.MjModel.from_xml_string(scene_xml)
+    mjm = mujoco.MjModel.from_xml_string(scene.xml_fn())
     collision = build_collision_description(mjm)
     rng = np.random.default_rng(7)
     body_pos, body_quat = _poses(rng, num_envs, mjm.nbody)
-    origins, directions = _rays(rng, num_rays)
+    origins, directions = scene.rays_fn(rng, num_rays)
 
     caster = uni_ray.create_ray_caster(
         num_envs=num_envs, num_rays=num_rays, collision=collision, device=device
@@ -263,27 +360,36 @@ def _sanity_check(scene_xml: str, device: str) -> None:
             f"worst |dt| on agreed hits {worst:.3e}"
         )
         if mask_mismatch or geom_mismatch:
-            plane = 0
+            ground = 0  # geom 0 is the plane/hfield in every scene here
             only_uni = uni_hit & ~mjw_hit
             only_mjw = mjw_hit & ~uni_hit
             diff_geom = agree & ~same_geom
             print(
-                f"    mismatch detail: uni-hit-only involving plane geom "
-                f"{int(np.count_nonzero(only_uni & (uni_geom == plane)))}/"
+                f"    mismatch detail: uni-hit-only involving geom 0 "
+                f"{int(np.count_nonzero(only_uni & (uni_geom == ground)))}/"
                 f"{int(np.count_nonzero(only_uni))}; mjw-hit-only "
                 f"{int(np.count_nonzero(only_mjw))}; both-hit different geom "
                 f"{int(np.count_nonzero(diff_geom))} "
-                f"(uni->plane: {int(np.count_nonzero(diff_geom & (uni_geom == plane)))})"
+                f"(uni->geom 0: {int(np.count_nonzero(diff_geom & (uni_geom == ground)))})"
             )
+            if use_bvh and not scene.mjwarp_bvh:
+                print(
+                    "    note: mujoco-warp BVH (RenderContext) covers only the hfield top "
+                    "surface; side/base rays are missed by BVH mode and below-base rays hit "
+                    "the top from underneath (capability finding — the distance check is "
+                    "informational for this mode; brute mode matches uni_ray exactly)"
+                )
+        if use_bvh and not scene.mjwarp_bvh:
+            continue  # documented BVH capability divergence; brute carries the hard check
         assert worst < 1e-3, f"mujoco-warp [{mode}] distance mismatch {worst}"
 
 
 def _run_shape(
-    mjm, collision, num_envs: int, num_rays: int, iterations: int, device: str
-) -> dict[str, float]:
+    scene: _Scene, mjm, collision, num_envs: int, num_rays: int, iterations: int, device: str
+) -> dict[str, float | None]:
     rng = np.random.default_rng(7)
     body_pos, body_quat = _poses(rng, num_envs, mjm.nbody)
-    origins, directions = _rays(rng, num_rays)
+    origins, directions = scene.rays_fn(rng, num_rays)
 
     caster = uni_ray.create_ray_caster(
         num_envs=num_envs, num_rays=num_rays, collision=collision, device=device
@@ -295,18 +401,28 @@ def _run_shape(
     bench = _MjwarpBench(mjm, num_envs, num_rays, device)
     bench.set_inputs(_qpos_from_body_poses(body_pos, body_quat, mjm.nq), origins, directions)
     # Warmup (covers lazy kernel compilation), then timed segments.
-    for use_bvh in (False, True):
+    modes = (False, True) if scene.mjwarp_bvh else (False,)
+    for use_bvh in modes:
         for _ in range(3):
             bench.pose_update(refit=use_bvh)
             bench.trace(use_bvh)
-    out = dict(uni)
+    out: dict[str, float | None] = dict(uni)
     out["mjw_brute_pose"] = _mean_ms(lambda: bench.pose_update(False), device, iterations)
     out["mjw_brute_trace"] = _mean_ms(lambda: bench.trace(False), device, iterations)
     out["mjw_brute_kernel"] = _mean_ms(lambda: bench.kernel(False), device, iterations)
-    out["mjw_bvh_pose"] = _mean_ms(lambda: bench.pose_update(True), device, iterations)
-    out["mjw_bvh_trace"] = _mean_ms(lambda: bench.trace(True), device, iterations)
-    out["mjw_bvh_kernel"] = _mean_ms(lambda: bench.kernel(True), device, iterations)
+    if scene.mjwarp_bvh:
+        out["mjw_bvh_pose"] = _mean_ms(lambda: bench.pose_update(True), device, iterations)
+        out["mjw_bvh_trace"] = _mean_ms(lambda: bench.trace(True), device, iterations)
+        out["mjw_bvh_kernel"] = _mean_ms(lambda: bench.kernel(True), device, iterations)
+    else:
+        out["mjw_bvh_pose"] = None
+        out["mjw_bvh_trace"] = None
+        out["mjw_bvh_kernel"] = None
     return out
+
+
+def _fmt(value: float | None) -> str:
+    return f"{value:.4f}" if value is not None else "-"
 
 
 def main() -> None:
@@ -314,23 +430,38 @@ def main() -> None:
     parser.add_argument("--device", default=None, help="warp device (default: cuda:0 if present)")
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument(
-        "--skip-dense", action="store_true", help="only run the standard 7-geom scene"
+        "--scenes",
+        default=None,
+        help="comma-separated subset of scene keys "
+        f"({', '.join(scene.key for scene in _SCENES)}); default: all",
+    )
+    parser.add_argument(
+        "--skip-dense",
+        action="store_true",
+        help="skip the slow brute-force-heavy scenes (dense, densemesh)",
     )
     args = parser.parse_args()
     device = args.device or ("cuda:0" if wp.is_cuda_available() else "cpu")
     wp.init()
 
-    scenes = [("standard (7 geoms)", _build_scene_xml())]
-    if not args.skip_dense:
-        scenes.append(("dense (50 geoms)", _build_dense_scene_xml()))
+    scenes = list(_SCENES)
+    if args.scenes:
+        keys = args.scenes.split(",")
+        unknown = set(keys) - {scene.key for scene in _SCENES}
+        if unknown:
+            parser.error(f"unknown scene keys: {sorted(unknown)}")
+        scenes = [scene for scene in scenes if scene.key in keys]
+    if args.skip_dense:
+        scenes = [scene for scene in scenes if scene.key not in ("dense", "densemesh")]
 
     print(f"device: {device}  iters: {args.iters}  max_distance: {MAX_DISTANCE}")
     print("mujoco-warp mode: qpos H2D + kinematics (+ refit_bvh in BVH mode) + rays")
-    for scene_name, scene_xml in scenes:
-        print(f"\nscene: {scene_name}")
+    for scene in scenes:
+        scene_xml = scene.xml_fn()
+        print(f"\nscene: {scene.label}")
         print("correctness sanity check (8 envs x 64 rays, identical inputs):")
         with wp.ScopedDevice(device):
-            _sanity_check(scene_xml, device)
+            _sanity_check(scene, device)
             mjm = mujoco.MjModel.from_xml_string(scene_xml)
             collision = build_collision_description(mjm)
             rows = []
@@ -339,7 +470,7 @@ def main() -> None:
                     (
                         num_envs,
                         num_rays,
-                        _run_shape(mjm, collision, num_envs, num_rays, args.iters, device),
+                        _run_shape(scene, mjm, collision, num_envs, num_rays, args.iters, device),
                     )
                 )
         print(
@@ -349,12 +480,14 @@ def main() -> None:
         )
         print("|---|---|---|---|---|---|---|---|---|---|")
         for num_envs, num_rays, r in rows:
+            bvh_trace = r["mjw_bvh_trace"]
+            speedup_bvh = f"{bvh_trace / r['trace_total']:.2f}x" if bvh_trace else "-"
             print(
                 f"| {num_envs} | {num_rays} | {r['update_pose_total']:.4f} | "
                 f"{r['trace_total']:.4f} | {r['mjw_brute_pose']:.4f} | "
-                f"{r['mjw_brute_trace']:.4f} | {r['mjw_bvh_pose']:.4f} | "
-                f"{r['mjw_bvh_trace']:.4f} | {r['mjw_brute_trace'] / r['trace_total']:.2f}x | "
-                f"{r['mjw_bvh_trace'] / r['trace_total']:.2f}x |"
+                f"{r['mjw_brute_trace']:.4f} | {_fmt(r['mjw_bvh_pose'])} | "
+                f"{_fmt(bvh_trace)} | {r['mjw_brute_trace'] / r['trace_total']:.2f}x | "
+                f"{speedup_bvh} |"
             )
         print(
             "\n| num_envs | num_rays | uni_ray kernel (ms) | mjw brute kernel (ms) | "
@@ -362,11 +495,12 @@ def main() -> None:
         )
         print("|---|---|---|---|---|---|---|")
         for num_envs, num_rays, r in rows:
+            bvh_kernel = r["mjw_bvh_kernel"]
+            ratio_bvh = f"{bvh_kernel / r['intersection']:.2f}x" if bvh_kernel else "-"
             print(
                 f"| {num_envs} | {num_rays} | {r['intersection']:.4f} | "
-                f"{r['mjw_brute_kernel']:.4f} | {r['mjw_bvh_kernel']:.4f} | "
-                f"{r['mjw_brute_kernel'] / r['intersection']:.2f}x | "
-                f"{r['mjw_bvh_kernel'] / r['intersection']:.2f}x |"
+                f"{r['mjw_brute_kernel']:.4f} | {_fmt(bvh_kernel)} | "
+                f"{r['mjw_brute_kernel'] / r['intersection']:.2f}x | {ratio_bvh} |"
             )
 
 
