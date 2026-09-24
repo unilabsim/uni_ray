@@ -1,0 +1,73 @@
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "uni_ray"
+
+[project]
+name = "uni-ray"
+version = "0.1.0"
+description = "Warp-accelerated ray caster plugin for the UniSim ray-query contract"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "UniSim Authors" }]
+requires-python = ">=3.10,<3.14"
+dependencies = ["numpy", "unisim-core"]
+keywords = ["physics", "simulation", "robotics", "ray-casting", "lidar"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+# GPU/CPU ray tracing runtime (Warp kernels, BVH, mesh acceleration).
+warp = ["warp-lang>=1.11.0"]
+# Cold-path MuJoCo MjModel parsing for the mjbatch descriptor builder.
+mujoco = ["mujoco>=3.2.0"]
+
+[dependency-groups]
+# The dev group installs the optional runtimes so the full test suite runs
+# with a plain `uv sync`; they stay optional for downstream consumers.
+dev = ["pytest", "ruff", "mypy", "warp-lang>=1.11.0", "mujoco>=3.2.0"]
+
+[tool.uv.sources]
+# Local development against the sibling unisim checkout (ray-query contract).
+unisim-core = { path = "../unisim", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+# mypy is configured like the sibling unisim repository: no_site_packages +
+# ignore_missing_imports mean site-package stubs (NumPy included) and the
+# stub-less optional SDKs (warp, mujoco) resolve as Any; first-party code is
+# otherwise fully checked.
+[tool.mypy]
+mypy_path = "src"
+explicit_package_bases = true
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+no_site_packages = true
+
+# Warp kernel signatures annotate parameters with wp.array(dtype=...) calls,
+# which are kernel DSL metadata, not Python type annotations; mypy cannot
+# parse them, so valid-type is disabled for the kernels module only.
+[[tool.mypy.overrides]]
+module = "uni_ray.kernels"
+disable_error_code = ["valid-type"]

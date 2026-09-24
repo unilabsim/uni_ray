@@ -1,0 +1,115 @@
+"""Import-boundary tests: uni_ray must import and fail closed without warp/mujoco.
+
+Each check runs in a fresh subprocess with a meta-path blocker that makes
+``warp`` and ``mujoco`` unimportable, mirroring an environment where the
+optional runtimes are not installed.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import textwrap
+
+BLOCKER = """
+import sys
+
+
+class _Blocker:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in {"warp", "mujoco"}:
+            # Mirrors a genuinely missing package (ModuleNotFoundError), which
+            # is also what pytest.importorskip keys on.
+            raise ModuleNotFoundError(f"No module named '{name.split('.')[0]}'")
+        return None
+
+
+sys.meta_path.insert(0, _Blocker())
+"""
+
+
+def _run(code: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", BLOCKER + textwrap.dedent(code)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_import_uni_ray_without_optional_runtimes() -> None:
+    result = _run(
+        """
+        import sys
+
+        import uni_ray
+
+        assert "warp" not in sys.modules
+        assert "mujoco" not in sys.modules
+        assert callable(uni_ray.create_ray_caster)
+        import uni_ray.mjbatch
+
+        print("import-ok")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert "import-ok" in result.stdout
+
+
+def test_caster_creation_fails_closed_without_warp() -> None:
+    result = _run(
+        """
+        from unisim.optional import OptionalDependencyError
+
+        import uni_ray
+
+        try:
+            uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+        except OptionalDependencyError as error:
+            assert "warp-lang" in str(error), str(error)
+            print("fail-closed-ok")
+        else:
+            raise AssertionError("create_ray_caster should fail closed without warp")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert "fail-closed-ok" in result.stdout
+
+
+def test_unisim_factory_discovery_fails_closed_without_warp() -> None:
+    result = _run(
+        """
+        from unisim.factory import create_ray_caster
+        from unisim.optional import OptionalDependencyError
+
+        try:
+            create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+        except OptionalDependencyError as error:
+            assert "warp-lang" in str(error), str(error)
+            print("factory-fail-closed-ok")
+        else:
+            raise AssertionError("factory creation should fail closed without warp")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert "factory-fail-closed-ok" in result.stdout
+
+
+def test_mjbatch_builder_fails_closed_without_mujoco() -> None:
+    result = _run(
+        """
+        from unisim.optional import OptionalDependencyError
+
+        from uni_ray.mjbatch import build_collision_description
+
+        try:
+            build_collision_description(object())
+        except OptionalDependencyError as error:
+            assert "mujoco" in str(error), str(error)
+            print("mjbatch-fail-closed-ok")
+        else:
+            raise AssertionError("build_collision_description should fail closed without mujoco")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert "mjbatch-fail-closed-ok" in result.stdout
