@@ -30,6 +30,12 @@
 - `uni_ray.mjbatch.build_collision_description(mj_model)` reads a
   `mujoco.MjModel` exactly once on the cold path and produces the immutable
   `RaySceneDescription` plus mesh collision descriptor.
+- mjwarp profile (#300): `uni_ray.mjwarp.build_collision_description` sources
+  the same descriptor from a compiled `mujoco_warp.Model` through the shared
+  profile-neutral build, plus `uni_ray.mjwarp.create_ray_caster`
+  (build + bind) and `rebuild_caster_from_mjwarp` conveniences — see
+  [docs/backends.md](docs/backends.md) for usage and the pose-sync vs
+  device-pose boundary evaluation.
 
 ## Correctness and performance evidence
 

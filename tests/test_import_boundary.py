@@ -27,10 +27,27 @@ class _Blocker:
 sys.meta_path.insert(0, _Blocker())
 """
 
+# Variant that blocks only mujoco_warp (#300): the mjwarp adapter module must
+# import and fail closed without it, and uni_ray/factory discovery must be
+# unaffected.
+BLOCKER_MJWARP = """
+import sys
 
-def _run(code: str) -> subprocess.CompletedProcess[str]:
+
+class _Blocker:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in {"mujoco_warp"}:
+            raise ModuleNotFoundError(f"No module named '{name.split('.')[0]}'")
+        return None
+
+
+sys.meta_path.insert(0, _Blocker())
+"""
+
+
+def _run(code: str, blocker: str = BLOCKER) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-c", BLOCKER + textwrap.dedent(code)],
+        [sys.executable, "-c", blocker + textwrap.dedent(code)],
         capture_output=True,
         text=True,
         timeout=120,
@@ -113,3 +130,47 @@ def test_mjbatch_builder_fails_closed_without_mujoco() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "mjbatch-fail-closed-ok" in result.stdout
+
+
+def test_mjwarp_module_imports_and_factory_works_without_mujoco_warp() -> None:
+    result = _run(
+        """
+        import sys
+
+        import uni_ray
+        import uni_ray.mjwarp
+
+        assert "mujoco_warp" not in sys.modules
+        from unisim.factory import create_ray_caster
+
+        caster = create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+        caster.close()
+        print("import-and-factory-ok")
+        """,
+        blocker=BLOCKER_MJWARP,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "import-and-factory-ok" in result.stdout
+
+
+def test_mjwarp_builder_fails_closed_without_mujoco_warp() -> None:
+    result = _run(
+        """
+        from unisim.optional import OptionalDependencyError
+
+        from uni_ray.mjwarp import build_collision_description
+
+        try:
+            build_collision_description(object())
+        except OptionalDependencyError as error:
+            assert "mujoco-warp" in str(error), str(error)
+            print("mjwarp-fail-closed-ok")
+        else:
+            raise AssertionError(
+                "mjwarp build_collision_description should fail closed without mujoco_warp"
+            )
+        """,
+        blocker=BLOCKER_MJWARP,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "mjwarp-fail-closed-ok" in result.stdout

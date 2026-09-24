@@ -9,6 +9,11 @@ collision descriptor (:class:`MjBatchCollision`) consumed by
 lazy and confined to this module; the hot path (``update_pose``/``trace``)
 never sees an ``MjModel`` or ``MjData``.
 
+The extraction is split into a plain-NumPy snapshot (:class:`_ModelSceneData`)
+and a profile-neutral descriptor build (``_build_collision_description``) so
+``uni_ray.mjwarp`` can feed the same build from a ``mujoco_warp.Model``
+without going through an ``MjModel``.
+
 The MjModel extraction mirrors the init-time cold path of MuJoCo-LiDAR's
 ``MjLidarWarp`` (https://github.com/discoverse-dev/MuJoCo-LiDAR, MIT License,
 Copyright (c) 2025 Yufei Jia; see NOTICE): geom arrays are sliced out of the
@@ -103,6 +108,35 @@ class MjBatchCollision:
         object.__setattr__(self, "geom_mesh_ids", geom_mesh_ids)
 
 
+@dataclass(frozen=True)
+class _ModelSceneData:
+    """Plain-NumPy snapshot of the model fields the descriptor build reads.
+
+    Shared extraction target: ``_scene_data_from_mjmodel`` fills it from a
+    ``mujoco.MjModel`` and ``uni_ray.mjwarp`` fills it from a
+    ``mujoco_warp.Model``, so the descriptor build below is profile-neutral.
+    """
+
+    num_bodies: int
+    geom_type_codes: np.ndarray  # (G,) int64, MuJoCo mjtGeom numbering
+    geom_sizes: np.ndarray  # (G, 3) float64
+    geom_pos: np.ndarray  # (G, 3) float64
+    geom_quat: np.ndarray  # (G, 4) float64, wxyz
+    geom_body_ids: np.ndarray  # (G,) intp
+    geom_data_ids: np.ndarray  # (G,) int64
+    mesh_vert_adr: np.ndarray  # (M,) int64
+    mesh_vert_num: np.ndarray  # (M,) int64
+    mesh_face_adr: np.ndarray  # (M,) int64
+    mesh_face_num: np.ndarray  # (M,) int64
+    mesh_vert: np.ndarray  # (V, 3) float32
+    mesh_face: np.ndarray  # (3F,) int32, flat triangle array
+    hfield_nrow: np.ndarray  # (H,) int64
+    hfield_ncol: np.ndarray  # (H,) int64
+    hfield_adr: np.ndarray  # (H,) int64
+    hfield_size: np.ndarray  # (H, 4) float64
+    hfield_data: np.ndarray  # (nhfielddata,) float64
+
+
 def build_collision_description(mj_model: Any) -> MjBatchCollision:
     """Read a ``mujoco.MjModel`` once and freeze it into a collision descriptor.
 
@@ -121,69 +155,94 @@ def build_collision_description(mj_model: Any) -> MjBatchCollision:
         ) from error
     if not isinstance(mj_model, mujoco.MjModel):
         raise TypeError(f"mj_model must be a mujoco.MjModel, got {type(mj_model).__name__}")
+    return _build_collision_description(_scene_data_from_mjmodel(mj_model))
 
-    geom_type_codes = np.asarray(mj_model.geom_type, dtype=np.int64)
-    unknown = sorted(set(geom_type_codes.tolist()) - set(_MJ_TO_CONTRACT_TYPES))
+
+def _scene_data_from_mjmodel(mj_model: Any) -> _ModelSceneData:
+    """Snapshot the descriptor inputs out of a ``mujoco.MjModel``."""
+    return _ModelSceneData(
+        num_bodies=int(mj_model.nbody),
+        geom_type_codes=np.asarray(mj_model.geom_type, dtype=np.int64),
+        geom_sizes=np.array(mj_model.geom_size, dtype=np.float64, copy=True),
+        geom_pos=np.array(mj_model.geom_pos, dtype=np.float64, copy=True),
+        geom_quat=np.array(mj_model.geom_quat, dtype=np.float64, copy=True),
+        geom_body_ids=np.array(mj_model.geom_bodyid, dtype=np.intp, copy=True),
+        geom_data_ids=np.asarray(mj_model.geom_dataid, dtype=np.int64),
+        mesh_vert_adr=np.asarray(mj_model.mesh_vertadr, dtype=np.int64),
+        mesh_vert_num=np.asarray(mj_model.mesh_vertnum, dtype=np.int64),
+        mesh_face_adr=np.asarray(mj_model.mesh_faceadr, dtype=np.int64),
+        mesh_face_num=np.asarray(mj_model.mesh_facenum, dtype=np.int64),
+        mesh_vert=np.asarray(mj_model.mesh_vert, dtype=np.float32),
+        mesh_face=np.asarray(mj_model.mesh_face, dtype=np.int32).reshape(-1),
+        hfield_nrow=np.asarray(mj_model.hfield_nrow, dtype=np.int64),
+        hfield_ncol=np.asarray(mj_model.hfield_ncol, dtype=np.int64),
+        hfield_adr=np.asarray(mj_model.hfield_adr, dtype=np.int64),
+        hfield_size=np.asarray(mj_model.hfield_size, dtype=np.float64),
+        hfield_data=np.asarray(mj_model.hfield_data, dtype=np.float64),
+    )
+
+
+def _build_collision_description(data: _ModelSceneData) -> MjBatchCollision:
+    """Descriptor build shared by the mjbatch and mjwarp cold-path profiles."""
+    unknown = sorted(set(data.geom_type_codes.tolist()) - set(_MJ_TO_CONTRACT_TYPES))
     if unknown:
         raise UnsupportedCapabilityError(
-            f"uni_ray mjbatch does not support MuJoCo geom type codes {unknown}; "
+            f"uni_ray does not support MuJoCo geom type codes {unknown}; "
             "supported geoms are plane, hfield (triangulated), sphere, capsule, "
             "ellipsoid, cylinder, box, and static mesh"
         )
 
-    geom_types = tuple(_MJ_TO_CONTRACT_TYPES[int(code)] for code in geom_type_codes)
-    geom_sizes = np.array(mj_model.geom_size, dtype=np.float64, copy=True)
+    geom_types = tuple(_MJ_TO_CONTRACT_TYPES[int(code)] for code in data.geom_type_codes)
+    geom_sizes = np.array(data.geom_sizes, dtype=np.float64, copy=True)
     # The contract plane is the infinite local z = 0 plane and ignores sizes;
     # MuJoCo's plane size is a rendering grid, so zero it out.
-    geom_sizes[geom_type_codes == 0] = 0.0
+    geom_sizes[data.geom_type_codes == 0] = 0.0
 
-    meshes, geom_mesh_ids = _extract_meshes(mj_model, geom_type_codes)
+    meshes, geom_mesh_ids = _extract_meshes(data)
 
     scene = RaySceneDescription(
-        num_bodies=int(mj_model.nbody),
+        num_bodies=data.num_bodies,
         geom_types=geom_types,
         geom_sizes=geom_sizes,
-        geom_local_pos=np.array(mj_model.geom_pos, dtype=np.float64, copy=True),
-        geom_local_quat=np.array(mj_model.geom_quat, dtype=np.float64, copy=True),
-        geom_body_ids=np.array(mj_model.geom_bodyid, dtype=np.intp, copy=True),
+        geom_local_pos=np.array(data.geom_pos, dtype=np.float64, copy=True),
+        geom_local_quat=np.array(data.geom_quat, dtype=np.float64, copy=True),
+        geom_body_ids=np.array(data.geom_body_ids, dtype=np.intp, copy=True),
     )
     return MjBatchCollision(scene=scene, meshes=meshes, geom_mesh_ids=geom_mesh_ids)
 
 
-def _extract_meshes(
-    mj_model: Any, geom_type_codes: np.ndarray
-) -> tuple[tuple[MeshData, ...], np.ndarray]:
+def _extract_meshes(data: _ModelSceneData) -> tuple[tuple[MeshData, ...], np.ndarray]:
     """Slice static mesh data out of the model, deduplicated by (geom type, data id).
 
     Mesh geoms carry their compiled ``mesh_vert``/``mesh_face`` slice; hfield
     geoms are triangulated once in the geom-local frame. The dedup key carries
     the geom type because hfield and mesh data ids are separate index spaces.
     """
-    geom_mesh_ids = np.full(mj_model.ngeom, -1, dtype=np.intp)
+    geom_mesh_ids = np.full(data.geom_type_codes.shape[0], -1, dtype=np.intp)
     mesh_index_by_key: dict[tuple[int, int], int] = {}
     meshes: list[MeshData] = []
-    for geom_id, data_id in enumerate(np.asarray(mj_model.geom_dataid, dtype=np.int64)):
-        type_code = int(geom_type_codes[geom_id])
+    for geom_id, data_id in enumerate(data.geom_data_ids):
+        type_code = int(data.geom_type_codes[geom_id])
         if type_code not in (_MJ_GEOM_HFIELD, _MJ_GEOM_MESH) or data_id < 0:
             continue
         key = (type_code, int(data_id))
         if key not in mesh_index_by_key:
             if type_code == _MJ_GEOM_HFIELD:
-                points, faces = _triangulate_hfield(mj_model, int(data_id))
+                points, faces = _triangulate_hfield(data, int(data_id))
             else:
-                vert_adr = int(mj_model.mesh_vertadr[data_id])
-                vert_num = int(mj_model.mesh_vertnum[data_id])
-                face_adr = int(mj_model.mesh_faceadr[data_id])
-                face_num = int(mj_model.mesh_facenum[data_id])
-                points = mj_model.mesh_vert[vert_adr : vert_adr + vert_num].astype(np.float32)
-                faces = mj_model.mesh_face[face_adr : face_adr + face_num].reshape(-1)
+                vert_adr = int(data.mesh_vert_adr[data_id])
+                vert_num = int(data.mesh_vert_num[data_id])
+                face_adr = int(data.mesh_face_adr[data_id])
+                face_num = int(data.mesh_face_num[data_id])
+                points = data.mesh_vert[vert_adr : vert_adr + vert_num]
+                faces = data.mesh_face[face_adr * 3 : (face_adr + face_num) * 3]
             mesh_index_by_key[key] = len(meshes)
             meshes.append(MeshData(points=points, indices=faces.astype(np.int32)))
         geom_mesh_ids[geom_id] = mesh_index_by_key[key]
     return tuple(meshes), geom_mesh_ids
 
 
-def _triangulate_hfield(mj_model: Any, hfield_id: int) -> tuple[np.ndarray, np.ndarray]:
+def _triangulate_hfield(data: _ModelSceneData, hfield_id: int) -> tuple[np.ndarray, np.ndarray]:
     """Triangulate an hfield into a static closed-solid mesh in the geom-local frame.
 
     The top surface grid is ported from MuJoCo-LiDAR's
@@ -202,18 +261,18 @@ def _triangulate_hfield(mj_model: Any, hfield_id: int) -> tuple[np.ndarray, np.n
     direction, including side and below-base approaches; MuJoCo-LiDAR only
     builds the top surface.
     """
-    nrow = int(mj_model.hfield_nrow[hfield_id])
-    ncol = int(mj_model.hfield_ncol[hfield_id])
-    adr = int(mj_model.hfield_adr[hfield_id])
-    data = mj_model.hfield_data[adr : adr + nrow * ncol].reshape(nrow, ncol)
-    size = mj_model.hfield_size[hfield_id]
+    nrow = int(data.hfield_nrow[hfield_id])
+    ncol = int(data.hfield_ncol[hfield_id])
+    adr = int(data.hfield_adr[hfield_id])
+    hfield = data.hfield_data[adr : adr + nrow * ncol].reshape(nrow, ncol)
+    size = data.hfield_size[hfield_id]
     rx, ry, ez = float(size[0]), float(size[1]), float(size[2])
     base_z = float(size[3])
 
     x = np.linspace(-rx, rx, ncol, dtype=np.float32)
     y = np.linspace(-ry, ry, nrow, dtype=np.float32)
     xx, yy = np.meshgrid(x, y)
-    heights = (data * ez).astype(np.float32)
+    heights = (hfield * ez).astype(np.float32)
     points = np.stack((xx, yy, heights), axis=-1).reshape(-1, 3).astype(np.float32)
 
     cells = np.arange((nrow - 1) * (ncol - 1), dtype=np.int32).reshape(nrow - 1, ncol - 1)

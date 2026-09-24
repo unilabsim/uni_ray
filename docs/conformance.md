@@ -3,7 +3,10 @@
 This page records the correctness sweeps, contract semantics, hot-path
 audits, and segmented timings for the mjbatch Warp ray caster
 (`WarpRayCaster`). Everything listed here is enforced by tests under
-`tests/` or reproducible via `benchmarks/bench_mjbatch.py`.
+`tests/` or reproducible via `benchmarks/bench_mjbatch.py`. The mjwarp
+profile (#300) — same descriptor and caster sourced from a
+`mujoco_warp.Model` — is documented in
+[docs/backends.md](backends.md).
 
 ## Numeric tolerances
 
