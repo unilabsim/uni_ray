@@ -55,7 +55,8 @@ rebuild-path timings from `benchmarks/bench_rebuild.py`.
 
 ## Installation
 
-The package depends on `unisim-core` (the ray-query contract) and NumPy.
+The package depends on `unisim-core>=2.2.0` (the ray-query contract) and
+NumPy; the public ray-query contract is introduced by that UniSim release.
 Warp and MuJoCo are optional extras, imported lazily:
 
 ```bash
@@ -63,7 +64,8 @@ uv sync --extra warp --extra mujoco   # or just `uv sync` (dev group includes bo
 ```
 
 For local development against a sibling UniSim checkout, `pyproject.toml`
-carries `[tool.uv.sources] unisim-core = { path = "../unisim", editable = true }`.
+carries `[tool.uv.sources] unisim-core = { path = "../unisim", editable = true }`;
+that checkout may temporarily lead the published UniSim release.
 
 ## Usage
 

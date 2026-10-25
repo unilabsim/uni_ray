@@ -13,7 +13,7 @@ readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "UniSim Authors" }]
 requires-python = ">=3.10,<3.14"
-dependencies = ["numpy", "unisim-core"]
+dependencies = ["numpy", "unisim-core>=2.2.0"]
 keywords = ["physics", "simulation", "robotics", "ray-casting", "lidar"]
 classifiers = [
     "Development Status :: 3 - Alpha",
