@@ -326,12 +326,33 @@ def test_shared_per_env_selected_and_result_reuse(caster: Any) -> None:
     _synchronize()
 
 
-def test_tensor_host_parity_and_allocation_audit(caster: Any) -> None:
-    caster.update_pose_tensor(_pose(caster))
+def test_tensor_host_parity_and_allocation_audit(
+    caster: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     origins, directions = _rays(caster._required_tensor_device())
     outputs = RayTraceOutputs(hit_point=True, geom_id=True, body_id=True)
+
+    # ``wp.from_torch`` and zero-copy ``wp.array`` wrappers are metadata objects;
+    # spy on the storage-allocating constructors instead.
+    allocation_names = ("zeros", "empty", "full", "from_numpy")
+    allocation_spies = {name: _AllocationSpy(getattr(wp, name)) for name in allocation_names}
+    for name, spy in allocation_spies.items():
+        monkeypatch.setattr(wp, name, spy)
+    # Warm up lazy Warp kernel compilation and one-time output/staging profiles.
+    caster.update_pose_tensor(_pose(caster))
     tensor_result = caster.trace_tensor(origins, directions, 7.0, outputs=outputs)
-    tensor_result = caster.trace_tensor(origins, directions, 7.0, outputs=outputs)
+    _synchronize()
+    steady_pose = _pose(caster)
+    for name, spy in allocation_spies.items():
+        spy.calls = 0
+    for _ in range(3):
+        caster.update_pose_tensor(steady_pose)
+        tensor_result = caster.trace_tensor(origins, directions, 7.0, outputs=outputs)
+    _synchronize()
+    for name, spy in allocation_spies.items():
+        assert spy.calls == 0, f"tensor hot path called wp.{name} {spy.calls} times"
+    monkeypatch.undo()
+
     host_result = caster.trace(
         origins.detach().cpu().numpy(),
         directions.detach().cpu().numpy(),
@@ -366,6 +387,16 @@ def test_tensor_host_parity_and_allocation_audit(caster: Any) -> None:
         assert getattr(steady, name) is getattr(tensor_result, name), name
 
 
+class _AllocationSpy:
+    def __init__(self, wrapped: Any) -> None:
+        self.wrapped = wrapped
+        self.calls = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self.wrapped(*args, **kwargs)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA stream ordering required")
 def test_caller_stream_ordering(caster: Any) -> None:
     caster.update_pose_tensor(_pose(caster))
@@ -379,6 +410,49 @@ def test_caller_stream_ordering(caster: Any) -> None:
     stream.synchronize()
     assert torch.isfinite(consumer).all()
     _expected_close(result.distance[0], torch.tensor([2.0, 2.0, 3.5]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA transfer audit required")
+def test_cuda_tensor_trace_has_no_hidden_transfers_or_synchronizations(
+    scene: RaySceneDescription, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the steady-state tensor profile device-resident and asynchronous."""
+    local = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
+    local.materialize(scene)
+    local.bind_pose_layout(scene.body_names)
+    pose = _pose(local, packet=True)
+    origins, directions = _rays("cuda:0")
+    outputs = RayTraceOutputs(hit_point=True, geom_id=True, body_id=True)
+    local.update_pose_tensor(pose)
+    local.trace_tensor(origins, directions, 7.0, outputs=outputs)
+    torch.cuda.synchronize()
+
+    copy_spy = _AllocationSpy(wp.copy)
+    warp_sync_spy = _AllocationSpy(wp.synchronize_device)
+    torch_sync_spy = _AllocationSpy(torch.cuda.synchronize)
+    tensor_cpu_spy = _AllocationSpy(torch.Tensor.cpu)
+    tensor_to_spy = _AllocationSpy(torch.Tensor.to)
+    monkeypatch.setattr(wp, "copy", copy_spy)
+    monkeypatch.setattr(wp, "synchronize_device", warp_sync_spy)
+    monkeypatch.setattr(torch.cuda, "synchronize", torch_sync_spy)
+    monkeypatch.setattr(torch.Tensor, "cpu", tensor_cpu_spy)
+    monkeypatch.setattr(torch.Tensor, "to", tensor_to_spy)
+
+    for _ in range(3):
+        local.update_pose_tensor(pose)
+        local.trace_tensor(origins, directions, 7.0, outputs=outputs)
+
+    monkeypatch.undo()
+    torch.cuda.synchronize()
+    for name, spy in (
+        ("wp.copy", copy_spy),
+        ("wp.synchronize_device", warp_sync_spy),
+        ("torch.cuda.synchronize", torch_sync_spy),
+        ("Tensor.cpu", tensor_cpu_spy),
+        ("Tensor.to", tensor_to_spy),
+    ):
+        assert spy.calls == 0, f"tensor hot path invoked {name} {spy.calls} times"
+    local.close()
 
 
 def test_close_invalidates_tensor_profile(caster: Any) -> None:

@@ -12,8 +12,12 @@ import pytest
 
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the mesh sweep")
 wp = pytest.importorskip("warp", reason="warp-lang is required for the mesh sweep")
+torch = pytest.importorskip("torch", reason="torch is required for the tensor sweep")
 
-from unisim.ray_query import RayTraceOutputs  # noqa: E402
+from unisim.ray_query import (  # noqa: E402
+    RayPoseTensorView,
+    RayTraceOutputs,
+)
 
 import uni_ray  # noqa: E402
 from uni_ray.mjbatch import build_collision_description  # noqa: E402
@@ -53,6 +57,13 @@ def _uv_sphere_mesh_xml(name: str, radius: float, nlat: int = 6, nlon: int = 12)
     vertex_attr = " ".join(f"{x} {y} {z}" for x, y, z in vertices)
     face_attr = " ".join(f"{a} {b} {c}" for a, b, c in faces)
     return f'<mesh name="{name}" vertex="{vertex_attr}" face="{face_attr}"/>'
+
+
+def _pose_tensor(values: np.ndarray, device: str) -> torch.Tensor:
+    """Materialize a compact float32 pose block with non-degenerate strides."""
+    tensor = torch.empty((1, values.shape[0], values.shape[1]), dtype=torch.float32)
+    tensor.copy_(torch.from_numpy(np.asarray(values, dtype=np.float32))[None])
+    return tensor.to(device)
 
 
 def _mj_ray_all(
@@ -110,21 +121,38 @@ def test_static_mesh_scene_matches_mj_ray() -> None:
 
     caster = uni_ray.create_ray_caster(num_envs=1, num_rays=num_rays, collision=collision)
     caster.materialize(collision.scene)
+    caster_device = caster._device_obj.alias
     try:
-        caster.update_pose(data.xpos[None], data.xquat[None])
+        caster.bind_pose_layout(collision.scene.body_names)
+        caster.update_pose_tensor(
+            RayPoseTensorView(
+                body_names=collision.scene.body_names,
+                pos_w=_pose_tensor(data.xpos, caster_device),
+                quat_w=_pose_tensor(data.xquat, caster_device),
+            )
+        )
         cpu_distances, cpu_geom_ids = _mj_ray_all(model, data, origins, directions, 20.0)
-        result = caster.trace(
-            origins, directions, max_distance=20.0, outputs=RayTraceOutputs(geom_id=True)
+        result = caster.trace_tensor(
+            torch.tensor(origins, dtype=torch.float32).to(caster_device),
+            torch.tensor(directions, dtype=torch.float32).to(caster_device),
+            max_distance=20.0,
+            outputs=RayTraceOutputs(geom_id=True),
         )
-        cpu_hit = cpu_distances >= 0.0
-        np.testing.assert_array_equal(result.hit[0], cpu_hit)
-        assert np.all(result.distance[0][~cpu_hit] == np.float32(20.0))
-        assert np.all(result.geom_id[0][~cpu_hit] == -1)
-        np.testing.assert_allclose(
-            result.distance[0][cpu_hit], cpu_distances[cpu_hit], atol=ATOL
+        cpu_hit = torch.tensor(cpu_distances >= 0.0, dtype=torch.bool)
+        torch.testing.assert_close(result.hit[0].cpu(), cpu_hit)
+        assert torch.all(result.distance[0][~cpu_hit].cpu() == torch.tensor(20.0))
+        assert torch.all(result.geom_id[0][~cpu_hit].cpu() == -1)
+        torch.testing.assert_close(
+            result.distance[0][cpu_hit].cpu(),
+            torch.tensor(cpu_distances[cpu_hit], dtype=torch.float32),
+            atol=ATOL,
+            rtol=0.0,
         )
-        np.testing.assert_array_equal(result.geom_id[0][cpu_hit], cpu_geom_ids[cpu_hit])
+        torch.testing.assert_close(
+            result.geom_id[0][cpu_hit].cpu(),
+            torch.tensor(cpu_geom_ids[cpu_hit], dtype=torch.int32),
+        )
         # Both meshes are exercised by the sweep.
-        assert set(np.unique(result.geom_id[0][cpu_hit]).tolist()) == {0, 1}
+        assert set(result.geom_id[0][cpu_hit].cpu().unique().tolist()) == {0, 1}
     finally:
         caster.close()
