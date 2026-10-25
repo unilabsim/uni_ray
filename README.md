@@ -116,6 +116,13 @@ stream. Staging storage is allocated once. Per-environment `(rows, num_rays, 3)`
 inputs likewise read the caller's tensors directly on every call. Geometry is
 the only ray-scene input that requires the explicit cold-path `rebuild()`.
 
+On CUDA, invalid `env_ids` are validated by a bounded device kernel rather than
+a per-call readback. The offending trace may therefore return before its
+`ValueError` is raised; the error is surfaced at the next cold boundary
+(`close()` or `rebuild()`), together with a message identifying the prior trace.
+Duplicate and out-of-range IDs still fail closed and reset the validation
+marker; valid traces do not synchronize.
+
 To randomize geometry between episodes without recreating the caster, mutate
 the model and rebuild on the cold path (poses reset to identity, so call
 `update_pose` again before tracing):
