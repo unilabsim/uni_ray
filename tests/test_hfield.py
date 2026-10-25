@@ -14,6 +14,10 @@ import numpy as np
 import pytest
 from unisim.ray_query import RayTraceOutputs
 
+torch = pytest.importorskip("torch", reason="torch is required for the tensor hfield path")
+
+from unisim.ray_query import RayPoseTensorView  # noqa: E402
+
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the hfield tests")
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
@@ -113,9 +117,19 @@ def _mj_ray_reference(model, data, origins, directions, max_distance):
 def _sync_pose(model, data, caster, qpos) -> None:
     data.qpos[:] = qpos
     mujoco.mj_forward(model, data)
-    caster.update_pose(
-        np.array(data.xpos, copy=True)[None], np.array(data.xquat, copy=True)[None]
+    caster.update_pose(np.array(data.xpos, copy=True)[None], np.array(data.xquat, copy=True)[None])
+
+
+def _packed_pose_tensors(
+    body_pos: np.ndarray, body_quat: np.ndarray, device: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the public full-batch views from a packed ``(pos, quat)`` carrier."""
+    carrier = torch.empty(
+        (body_pos.shape[0], body_pos.shape[1], 7), dtype=torch.float32, device=device
     )
+    carrier[..., :3].copy_(torch.from_numpy(np.asarray(body_pos, dtype=np.float32)))
+    carrier[..., 3:7].copy_(torch.from_numpy(np.asarray(body_quat, dtype=np.float32)))
+    return carrier[..., :3], carrier[..., 3:7]
 
 
 def test_hfield_lifecycle_and_correctness_vs_mj_ray() -> None:
@@ -178,3 +192,60 @@ def test_hfield_geom_pose_follows_body_pose() -> None:
             np.array(result.distance)[0][ref_hit], ref_distances[ref_hit], atol=ATOL
         )
     caster.close()
+
+
+def test_hfield_tensor_path_follows_body_pose() -> None:
+    model = mujoco.MjModel.from_xml_string(MOVING_TERRAIN_XML)
+    data = mujoco.MjData(model)
+    collision = build_collision_description(model)
+    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=NUM_RAYS, collision=collision)
+    caster.materialize(collision.scene)
+    origins, directions = _rays()
+
+    references = []
+    body_pos, body_quat = [], []
+    for pose in (POSE_A, POSE_B):
+        data.qpos[:] = pose
+        mujoco.mj_forward(model, data)
+        body_pos.append(np.array(data.xpos, copy=True))
+        body_quat.append(np.array(data.xquat, copy=True))
+        references.append(_mj_ray_reference(model, data, origins, directions, 10.0))
+
+    caster_device = caster._device_obj.alias
+    pos_w, quat_w = _packed_pose_tensors(np.stack(body_pos), np.stack(body_quat), caster_device)
+    caster.bind_pose_layout(collision.scene.body_names)
+    caster.update_pose_tensor(
+        RayPoseTensorView(body_names=collision.scene.body_names, pos_w=pos_w, quat_w=quat_w)
+    )
+    ray_origins = torch.tensor(origins, dtype=torch.float32).to(caster_device)
+    ray_directions = torch.tensor(directions, dtype=torch.float32).to(caster_device)
+    try:
+        result = caster.trace_tensor(
+            ray_origins,
+            ray_directions,
+            max_distance=10.0,
+            outputs=RayTraceOutputs(geom_id=True),
+        )
+        assert result.distance.device == ray_origins.device
+        assert result.hit.device == ray_origins.device
+        assert result.geom_id is not None
+        assert result.geom_id.device == ray_origins.device
+        for env_id, (ref_distances, ref_geom_ids) in enumerate(references):
+            ref_hit = torch.from_numpy(ref_geom_ids >= 0)
+            ref_hit_device = ref_hit.to(caster_device)
+            torch.testing.assert_close(result.hit[env_id], ref_hit_device)
+            torch.testing.assert_close(
+                result.distance[env_id][ref_hit_device],
+                torch.from_numpy(ref_distances[ref_hit.numpy()].astype(np.float32)).to(
+                    caster_device
+                ),
+                atol=ATOL,
+                rtol=0.0,
+            )
+            torch.testing.assert_close(
+                result.geom_id[env_id][ref_hit_device],
+                torch.from_numpy(ref_geom_ids[ref_hit.numpy()]).to(caster_device),
+            )
+            assert bool((~ref_hit_device).any())
+    finally:
+        caster.close()
