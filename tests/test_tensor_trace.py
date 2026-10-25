@@ -40,6 +40,13 @@ def _device() -> str:
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
+def _public_device() -> Any:
+    """Represent the device object a cross-package factory caller may use."""
+    if not torch.cuda.is_available():
+        return "cpu"
+    return torch.device("cuda", index=torch.cuda.current_device())
+
+
 def _expected_close(actual: Any, expected: Any, **kwargs: Any) -> None:
     torch.testing.assert_close(actual, expected.to(device=actual.device), **kwargs)
 
@@ -109,6 +116,19 @@ def test_capabilities_and_import_boundary() -> None:
     assert capabilities.stream_event_ownership == "caller"
     assert capabilities.supports_host_readback
     caster.close()
+
+
+def test_factory_accepts_public_torch_device_object(scene: RaySceneDescription) -> None:
+    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device=_public_device())
+    try:
+        caster.materialize(scene)
+        caster.bind_pose_layout(scene.body_names)
+        caster.update_pose_tensor(_pose(caster))
+        origins, directions = _rays(caster._required_tensor_device())
+        result = caster.trace_tensor(origins, directions, 3.0)
+        assert result.distance.shape == (2, 3)
+    finally:
+        caster.close()
 
 
 def test_pose_layout_and_packet_strided_views(caster: Any) -> None:

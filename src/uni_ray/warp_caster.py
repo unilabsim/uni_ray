@@ -160,7 +160,7 @@ class WarpRayCaster(RayCaster):
         num_rays: int = 1,
         *,
         collision: MjBatchCollision | None = None,
-        device: str | None = None,
+        device: str | Any | None = None,
     ) -> None:
         for name, value in (("num_envs", num_envs), ("num_rays", num_rays)):
             if isinstance(value, bool) or not isinstance(value, int):
@@ -171,7 +171,7 @@ class WarpRayCaster(RayCaster):
         self._num_rays = num_rays
         self._collision = collision
         wp.init()
-        self._device = device if device is not None else _default_device()
+        self._device = str(device) if device is not None else _default_device()
 
         self._scene: RaySceneDescription | None = None
         self._closed = False
@@ -250,7 +250,7 @@ class WarpRayCaster(RayCaster):
         self._aabb_lowers_dev: wp.array | None = None
         self._aabb_uppers_dev: wp.array | None = None
         self._bvh: wp.Bvh | None = None
-        self._device_obj = wp.get_device(device)
+        self._device_obj = wp.get_device(self._device)
         self._pose_pos_host: np.ndarray | None = None
         self._pose_quat_host: np.ndarray | None = None
         self._pose_pos_host_wp: wp.array | None = None
