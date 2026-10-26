@@ -70,7 +70,11 @@ def test_capabilities_are_declared_honestly() -> None:
     assert capabilities.supports_pose_sync
     assert capabilities.supports_per_env_rays
     assert capabilities.supports_host_readback
-    assert not capabilities.supports_device_output
+    assert capabilities.supports_device_output
+    assert capabilities.supports_tensor_pose_sync
+    assert capabilities.supports_tensor_rays
+    assert capabilities.torch_devices == ("cpu", "cuda")
+    assert capabilities.stream_event_ownership == "caller"
     caster.close()
 
 

@@ -20,7 +20,10 @@ path.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
+from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -29,16 +32,24 @@ from unisim.ray_query import (
     RayCaster,
     RayCasterCapabilities,
     RayGeomType,
+    RayPoseTensorView,
     RaySceneDescription,
     RayTraceOutputs,
     RayTraceResult,
+    RayTraceTensorResult,
 )
 
 from .kernels import (
     compute_geom_poses_kernel,
+    fill_empty_trace_kernel,
+    fill_ray_pattern_kernel,
     trace_rays_batch_bvh_kernel,
     update_aabbs_batch_kernel,
+    write_body_poses_from_tensors_kernel,
     write_body_poses_kernel,
+    write_env_map_and_validate_ids_kernel,
+    write_tensor_trace_outputs_kernel,
+    zero_int32_kernel,
 )
 from .mjbatch import MjBatchCollision
 
@@ -65,14 +76,66 @@ _POSITIVE_SIZE_DIMS = {
 
 # Warp quaternions are stored (x, y, z, w); the contract uses wxyz.
 _WXYZ_TO_XYZW = (1, 2, 3, 0)
+_LITTLE_ENDIAN = sys.byteorder == "little"
 
 
 def _default_device() -> str:
     return "cuda:0" if wp.get_cuda_device_count() > 0 else "cpu"
 
 
+def _torch_int64_view(tensor: Any) -> wp.array:
+    """Alias a contiguous public int64 ID tensor without copying."""
+    if not _LITTLE_ENDIAN:
+        raise RuntimeError("uni_ray tensor environment IDs require a little-endian host")
+    view = wp.array(
+        ptr=tensor.data_ptr(),
+        dtype=wp.int64,
+        shape=(tensor.numel(),),
+        strides=(8,),
+        device=tensor.device.type if tensor.device.type == "cpu" else f"cuda:{tensor.device.index}",
+        copy=False,
+    )
+    view._tensor = tensor
+    return view
+
+
+@contextmanager
+def _torch_caller_stream_scope(torch: Any, device: str, warp_device: wp.Device) -> Any:
+    """Launch Warp work on Torch's current stream without host synchronization."""
+    if device == "cpu":
+
+        @contextmanager
+        def cpu_scope() -> Any:
+            yield
+
+        with cpu_scope():
+            yield
+        return
+
+    caller = torch.cuda.current_stream(device)
+    stream = wp.Stream(device=warp_device, cuda_stream=int(caller.cuda_stream))
+    try:
+        with wp.ScopedStream(stream, sync_enter=False):
+            yield
+    finally:
+        # The caller owns the underlying CUDA stream; this only unregisters Warp's
+        # temporary external-stream wrapper after all launches have been enqueued.
+        stream.__del__()
+
+
+def _has_non_overlapping_strides(shape: tuple[int, ...], strides: tuple[int, ...]) -> bool:
+    """Return whether positive axis strides map logical indices injectively."""
+    active = sorted((stride, size) for size, stride in zip(shape, strides, strict=True) if size > 1)
+    extent = 1
+    for stride, size in active:
+        if stride < extent:
+            return False
+        extent = (size - 1) * stride + 1
+    return True
+
+
 class WarpRayCaster(RayCaster):
-    """Batched Warp ray caster with per-env BVH groups and host readback."""
+    """Batched Warp ray caster with NumPy and Torch-native query profiles."""
 
     caster_type = "uni_ray"
 
@@ -80,7 +143,11 @@ class WarpRayCaster(RayCaster):
         supports_pose_sync=True,
         supports_per_env_rays=True,
         supports_host_readback=True,
-        supports_device_output=False,
+        supports_device_output=True,
+        supports_tensor_pose_sync=True,
+        supports_tensor_rays=True,
+        torch_devices=("cpu", "cuda"),
+        stream_event_ownership="caller",
         supports_hit_point=True,
         supports_normal=False,
         supports_geom_id=True,
@@ -93,7 +160,7 @@ class WarpRayCaster(RayCaster):
         num_rays: int = 1,
         *,
         collision: MjBatchCollision | None = None,
-        device: str | None = None,
+        device: str | Any | None = None,
     ) -> None:
         for name, value in (("num_envs", num_envs), ("num_rays", num_rays)):
             if isinstance(value, bool) or not isinstance(value, int):
@@ -104,10 +171,33 @@ class WarpRayCaster(RayCaster):
         self._num_rays = num_rays
         self._collision = collision
         wp.init()
-        self._device = device if device is not None else _default_device()
+        self._device = str(device) if device is not None else _default_device()
 
         self._scene: RaySceneDescription | None = None
         self._closed = False
+        self._tensor_layout: tuple[str, ...] | None = None
+        self._tensor_pose_device: str | None = None
+        self._tensor_pos: Any | None = None
+        self._tensor_pos_wp: wp.array | None = None
+        self._tensor_quat: Any | None = None
+        self._tensor_quat_wp: wp.array | None = None
+        self._tensor_env_ids_wp: wp.array | None = None
+        self._tensor_static_pattern: tuple[Any, Any] | None = None
+        self._tensor_static_origins: wp.array | None = None
+        self._tensor_static_directions: wp.array | None = None
+        self._tensor_results: dict[tuple[int, bool, bool, bool], RayTraceTensorResult] = {}
+        # Minimal outputs always use a caster-owned geom-id scratch tensor; optional
+        # profiles own their returned geom_id views.
+        self._tensor_hit_geoms: Any | None = None
+        self._env_id_error = wp.zeros(1, dtype=wp.int32, device=self._device)
+        self._env_id_seen = wp.zeros(self._num_envs, dtype=wp.int32, device=self._device)
+        self._all_env_map_dev = wp.array(
+            np.arange(self._num_envs, dtype=np.int32),
+            dtype=wp.int32,
+            device=self._device,
+        )
+        self._empty3d_float32 = wp.zeros((0, 0, 0), dtype=wp.float32, device=self._device)
+        self._empty2d_int32 = wp.zeros((0, 0), dtype=wp.int32, device=self._device)
 
         # Persistent ray staging and result buffers (fixed batch shape).
         self._ray_origins_host = np.zeros((num_envs, num_rays, 3), dtype=np.float32)
@@ -160,6 +250,7 @@ class WarpRayCaster(RayCaster):
         self._aabb_lowers_dev: wp.array | None = None
         self._aabb_uppers_dev: wp.array | None = None
         self._bvh: wp.Bvh | None = None
+        self._device_obj = wp.get_device(self._device)
         self._pose_pos_host: np.ndarray | None = None
         self._pose_quat_host: np.ndarray | None = None
         self._pose_pos_host_wp: wp.array | None = None
@@ -213,6 +304,7 @@ class WarpRayCaster(RayCaster):
         """
         self._require_open()
         self._require_materialized()
+        self._check_pending_env_id_error()
         if (collision is None) == (scene is None):
             raise ValueError("rebuild takes exactly one of collision= or scene=")
         if collision is not None:
@@ -256,6 +348,20 @@ class WarpRayCaster(RayCaster):
         self._scene = scene
         self._num_bodies = scene.num_bodies
         self._num_geoms = num_geoms
+        self._tensor_layout = None
+        self._tensor_pose_device = None
+        self._tensor_pos = None
+        self._tensor_pos_wp = None
+        self._tensor_quat = None
+        self._tensor_quat_wp = None
+        self._tensor_env_ids_wp = None
+        self._tensor_static_pattern = None
+        self._tensor_static_origins = None
+        self._tensor_static_directions = None
+        self._tensor_results.clear()
+        self._tensor_hit_geoms = None
+        self._env_id_error.zero_()
+        self._env_id_seen.zero_()
         device = self._device
 
         geom_types = np.array(
@@ -303,9 +409,7 @@ class WarpRayCaster(RayCaster):
         self._geom_local_pos_dev = wp.array(
             scene.geom_local_pos.astype(np.float32), dtype=wp.vec3, device=device
         )
-        self._geom_local_quat_dev = wp.array(
-            geom_local_quat_xyzw, dtype=wp.quat, device=device
-        )
+        self._geom_local_quat_dev = wp.array(geom_local_quat_xyzw, dtype=wp.quat, device=device)
 
         num_envs = self._num_envs
         num_bodies = self._num_bodies
@@ -380,6 +484,78 @@ class WarpRayCaster(RayCaster):
         if self._bvh is not None:
             self._bvh.refit()
 
+    def bind_pose_layout(self, body_names: Sequence[str]) -> None:
+        """Bind the exact public dynamic-body order on the cold path."""
+        self._require_open()
+        scene = self._require_materialized()
+        if self._tensor_layout is not None:
+            raise BackendError("uni_ray caster tensor pose layout is already bound")
+        if isinstance(body_names, (str, bytes)) or not isinstance(body_names, Sequence):
+            raise TypeError("ray tensor body_names must be a sequence of strings")
+        names = tuple(body_names)
+        if not names or any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("ray tensor body names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"ray tensor body names must be unique: {names}")
+        if names != scene.body_names:
+            raise ValueError(
+                f"ray tensor body_names must equal the scene body layout "
+                f"{scene.body_names}, got {names}"
+            )
+        self._tensor_layout = names
+        caster_device = "cpu" if self._device_obj.is_cpu else f"cuda:{self._device_obj.ordinal}"
+        self._tensor_pose_device = caster_device
+
+    def update_pose_tensor(self, pose: RayPoseTensorView) -> None:
+        """Alias a full-batch caller-owned Torch pose view without copying."""
+        import torch
+
+        self._require_open()
+        scene = self._require_materialized()
+        layout = self._require_tensor_layout()
+        if not isinstance(pose, RayPoseTensorView):
+            raise TypeError("pose must be a RayPoseTensorView")
+        if pose.body_names != layout:
+            raise ValueError(
+                f"ray tensor pose body order {pose.body_names} does not match bound layout {layout}"
+            )
+        bound_device = self._required_tensor_device()
+        expected = (self._num_envs, len(layout), 3)
+        pos = self._validated_pose_tensor(
+            pose.pos_w, "pos_w", torch, device=bound_device, expected_shape=expected
+        )
+        quat = self._validated_pose_tensor(
+            pose.quat_w,
+            "quat_w",
+            torch,
+            device=bound_device,
+            expected_shape=(self._num_envs, len(layout), 4),
+        )
+        self._tensor_pos = pos
+        self._tensor_quat = quat
+        self._tensor_pos_wp = wp.from_torch(pos, dtype=wp.float32)
+        self._tensor_quat_wp = wp.from_torch(quat, dtype=wp.float32)
+        with _torch_caller_stream_scope(torch, bound_device, self._device_obj):
+            wp.launch(
+                write_body_poses_from_tensors_kernel,
+                dim=(self._num_envs, len(layout)),
+                inputs=[
+                    self._body_xpos_dev,
+                    self._body_xquat_dev,
+                    self._tensor_pos_wp,
+                    self._tensor_quat_wp,
+                ],
+                device=self._device,
+            )
+            self._refresh_tensor_poses_all_rows()
+            self._refit_bvh()
+        # Keep these aliases only for owner diagnostics and close; Warp arrays
+        # above retain the public tensors themselves.
+        del self._tensor_pos, self._tensor_quat
+        self._tensor_pos = self._tensor_pos_wp._tensor
+        self._tensor_quat = self._tensor_quat_wp._tensor
+        assert scene is not None
+
     def trace(
         self,
         ray_origins: np.ndarray,
@@ -449,12 +625,204 @@ class WarpRayCaster(RayCaster):
             body_id=body_id,
         )
 
+    def trace_tensor(
+        self,
+        ray_origins: Any,
+        ray_directions: Any,
+        max_distance: float,
+        env_ids: Any | None = None,
+        outputs: RayTraceOutputs | None = None,
+    ) -> RayTraceTensorResult:
+        """Launch a Torch-native query on the caller's current stream."""
+        import torch
+
+        self._require_open()
+        self._require_materialized()
+        self._require_tensor_layout()
+        request = self._check_trace_outputs(outputs)
+        if request.normal:
+            raise UnsupportedCapabilityError("uni_ray tensor path does not support normals")
+        limit = self._resolve_max_distance(max_distance)
+        device = self._required_tensor_device()
+        rows = self._resolve_tensor_rows(env_ids, torch, device)
+        origins, directions, shared = self._resolve_tensor_ray_batch(
+            ray_origins, ray_directions, torch, device, rows.shape[0]
+        )
+        result = self._tensor_result(
+            torch, device, rows.shape[0], request.hit_point, request.geom_id, request.body_id
+        )
+
+        with _torch_caller_stream_scope(torch, device, self._device_obj):
+            origins_wp = wp.from_torch(origins, dtype=wp.vec3)
+            directions_wp = wp.from_torch(directions, dtype=wp.vec3)
+            rows_wp = _torch_int64_view(rows)
+            distances_wp = wp.from_torch(result.distance, dtype=wp.float32)
+            hits_wp = wp.from_torch(result.hit, dtype=wp.bool)
+            if result.geom_id is None:
+                if self._tensor_hit_geoms is None:
+                    self._tensor_hit_geoms = torch.empty(
+                        (self._num_envs, self._num_rays), dtype=torch.int32, device=device
+                    )
+                result = RayTraceTensorResult(
+                    distance=result.distance,
+                    hit=result.hit,
+                    hit_point=result.hit_point,
+                    geom_id=self._tensor_hit_geoms,
+                    body_id=result.body_id,
+                )
+            hit_geoms_tensor = self._tensor_hit_geoms if result.geom_id is None else result.geom_id
+            hit_geoms_wp = wp.from_torch(hit_geoms_tensor, dtype=wp.int32)
+            hit_points_wp = (
+                wp.from_torch(result.hit_point, dtype=wp.float32)
+                if result.hit_point is not None
+                else self._empty3d_float32
+            )
+            body_ids_wp = (
+                wp.from_torch(result.body_id, dtype=wp.int32)
+                if result.body_id is not None
+                else self._empty2d_int32
+            )
+
+            if rows.shape[0]:
+                wp.launch(
+                    zero_int32_kernel,
+                    dim=[self._num_envs],
+                    inputs=[self._env_id_seen],
+                    device=self._device,
+                )
+                wp.launch(
+                    write_env_map_and_validate_ids_kernel,
+                    dim=[rows.shape[0]],
+                    inputs=[
+                        rows_wp,
+                        self._num_envs,
+                        self._env_id_seen,
+                        self._env_map_dev,
+                        self._env_id_error,
+                    ],
+                    device=self._device,
+                )
+            self._raise_on_env_id_error()
+            self._tensor_env_ids_wp = rows_wp
+            self._tensor_static_pattern = (
+                (origins_wp._tensor, directions_wp._tensor) if shared else None
+            )
+            if shared:
+                ray_origins, ray_directions = self._static_tensor_rays()
+                wp.launch(
+                    fill_ray_pattern_kernel,
+                    dim=(self._num_envs, self._num_rays),
+                    inputs=[ray_origins, ray_directions, origins_wp, directions_wp],
+                    device=self._device,
+                )
+                origins_wp = ray_origins
+                directions_wp = ray_directions
+            elif origins.ndim == 2:
+                ray_origins, ray_directions = self._static_tensor_rays()
+                wp.launch(
+                    fill_ray_pattern_kernel,
+                    dim=(rows.shape[0], self._num_rays),
+                    inputs=[
+                        ray_origins,
+                        ray_directions,
+                        wp.from_torch(origins, dtype=wp.vec3),
+                        wp.from_torch(directions, dtype=wp.vec3),
+                    ],
+                    device=self._device,
+                )
+                origins_wp = ray_origins
+                directions_wp = ray_directions
+
+            if rows.shape[0] == 0 or self._num_geoms == 0:
+                wp.launch(
+                    fill_empty_trace_kernel,
+                    dim=(rows.shape[0], self._num_rays),
+                    inputs=[
+                        distances_wp,
+                        hits_wp,
+                        hit_geoms_wp,
+                        hit_points_wp,
+                        body_ids_wp,
+                        float(limit),
+                        int(result.hit_point is not None),
+                        int(result.body_id is not None),
+                    ],
+                    device=self._device,
+                )
+            else:
+                assert self._bvh is not None
+                wp.launch(
+                    trace_rays_batch_bvh_kernel,
+                    dim=(rows.shape[0], self._num_rays),
+                    inputs=[
+                        self._bvh.id,
+                        self._geom_types_dev,
+                        self._geom_sizes_dev,
+                        self._geom_mesh_ids_dev,
+                        self._mesh_ids_dev,
+                        self._geom_xpos_dev,
+                        self._geom_xmat_dev,
+                        self._env_map_dev,
+                        origins_wp,
+                        directions_wp,
+                        float(limit),
+                        distances_wp,
+                        hits_wp,
+                        hit_geoms_wp,
+                    ],
+                    device=self._device,
+                )
+                if request.hit_point or request.body_id:
+                    assert self._geom_body_ids_dev is not None
+                    wp.launch(
+                        write_tensor_trace_outputs_kernel,
+                        dim=(rows.shape[0], self._num_rays),
+                        inputs=[
+                            origins_wp,
+                            directions_wp,
+                            distances_wp,
+                            hits_wp,
+                            hit_geoms_wp,
+                            self._geom_body_ids_dev,
+                            hit_points_wp,
+                            body_ids_wp,
+                            int(request.hit_point),
+                            int(request.body_id),
+                        ],
+                        device=self._device,
+                    )
+        return result
+
+    def _static_tensor_rays(self) -> tuple[wp.array, wp.array]:
+        """Return persistent staging for the current shared/per-row ray values."""
+        if self._tensor_static_origins is None:
+            self._tensor_static_origins = wp.zeros(
+                (self._num_envs, self._num_rays), dtype=wp.vec3, device=self._device
+            )
+            self._tensor_static_directions = wp.zeros(
+                (self._num_envs, self._num_rays), dtype=wp.vec3, device=self._device
+            )
+        return self._tensor_static_origins, self._tensor_static_directions
+
     def close(self) -> None:
         if self._closed:
             return
+        self._check_pending_env_id_error()
         self._closed = True
         self._meshes = []
         self._bvh = None
+        self._tensor_layout = None
+        self._tensor_pose_device = None
+        self._tensor_pos = None
+        self._tensor_pos_wp = None
+        self._tensor_quat = None
+        self._tensor_quat_wp = None
+        self._tensor_env_ids_wp = None
+        self._tensor_static_pattern = None
+        self._tensor_static_origins = None
+        self._tensor_static_directions = None
+        self._tensor_results.clear()
+        self._tensor_hit_geoms = None
 
     def _env_map_for(self, rows: np.ndarray) -> wp.array:
         self._env_map_host[: rows.size] = rows.astype(np.int32)
@@ -462,7 +830,7 @@ class WarpRayCaster(RayCaster):
         return self._env_map_dev
 
     def _refresh_poses(self, rows: np.ndarray) -> None:
-        """Recompute geom world poses and AABBs for the selected rows on device."""
+        """Recompute geom world poses for the selected rows on device."""
         if not rows.size or not self._num_geoms:
             return
         env_map = self._env_map_for(rows)
@@ -481,6 +849,228 @@ class WarpRayCaster(RayCaster):
             ],
             device=self._device,
         )
+        self._launch_update_aabbs(rows)
+
+    def _refresh_tensor_poses_all_rows(self) -> None:
+        """Refresh every tensor-path pose without a host-to-device row map."""
+        if not self._num_geoms:
+            return
+        wp.launch(
+            compute_geom_poses_kernel,
+            dim=(self._num_envs, self._num_geoms),
+            inputs=[
+                self._all_env_map_dev,
+                self._geom_body_ids_dev,
+                self._geom_local_pos_dev,
+                self._geom_local_quat_dev,
+                self._body_xpos_dev,
+                self._body_xquat_dev,
+                self._geom_xpos_dev,
+                self._geom_xmat_dev,
+            ],
+            device=self._device,
+        )
+        self._launch_update_aabbs(np.arange(self._num_envs, dtype=np.intp))
+
+    def _refit_bvh(self) -> None:
+        """Refit the BVH after an already-enqueued pose/AABB update."""
+        if self._bvh is None:
+            return
+        if self._device_obj.is_cpu:
+            self._bvh.refit()
+            return
+        self._bvh.runtime.core.wp_bvh_refit_device(self._bvh.id)
+
+    def _raise_on_env_id_error(self) -> None:
+        """Complete device-side selected-environment validation."""
+        if self._device_obj.is_cpu:
+            marker = self._env_id_error.numpy()[0]
+            self._env_id_error.zero_()
+            if marker:
+                self._env_id_seen.zero_()
+                raise ValueError(
+                    "ray tensor environment IDs must be distinct and in range "
+                    f"[0, {self._num_envs})"
+                )
+            return
+
+    def _check_pending_env_id_error(self) -> None:
+        """Check a CUDA validation marker on an explicit cold-path boundary."""
+        if self._device_obj.is_cpu:
+            return
+        marker = self._env_id_error.numpy()[0]
+        self._env_id_error.zero_()
+        if marker:
+            self._env_id_seen.zero_()
+            raise ValueError(
+                "ray tensor environment IDs must be distinct and in range "
+                f"[0, {self._num_envs}); prior tensor trace detected an invalid ID"
+            )
+
+    def _require_tensor_layout(self) -> tuple[str, ...]:
+        if self._tensor_layout is None:
+            raise BackendError("uni_ray caster requires bind_pose_layout before tensor queries")
+        return self._tensor_layout
+
+    def _resolve_torch_device(self, device: Any, name: str) -> str:
+        if device.type == "cpu":
+            return "cpu"
+        if device.type != "cuda":
+            raise ValueError(f"ray tensor {name} must live on cpu or cuda, got {str(device)!r}")
+        if device.index is None:
+            raise ValueError(f"ray tensor {name} CUDA device index must be explicit")
+        label = f"{device.type}:{device.index}"
+        expected = self._device_obj.alias
+        if label != expected:
+            raise ValueError(
+                f"ray tensor {name} must live on caster device {expected}, got {label}"
+            )
+        return label
+
+    def _required_tensor_device(self) -> str:
+        label = self._tensor_pose_device
+        if label is None:
+            raise BackendError("uni_ray caster requires update_pose_tensor before tensor queries")
+        return label
+
+    def _validated_tensor(
+        self,
+        value: Any,
+        name: str,
+        torch: Any,
+        *,
+        device: str | None = None,
+        expected_shape: tuple[int, ...] | None = None,
+        require_contiguous: bool = True,
+    ) -> Any:
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"ray tensor {name} must be a torch.Tensor")
+        if value.dtype != torch.float32:
+            raise TypeError(f"ray tensor {name} must have dtype float32")
+        if require_contiguous and not bool(value.is_contiguous()):
+            raise ValueError(
+                f"ray tensor {name} must be contiguous; caller materialization required"
+            )
+        if device is None:
+            device = self._resolve_torch_device(value.device, name)
+        elif self._resolve_torch_device(value.device, name) != device:
+            raise ValueError(f"ray tensor {name} must live on {device}, got {value.device}")
+        if expected_shape is not None and tuple(value.shape) != expected_shape:
+            raise ValueError(
+                f"ray tensor {name} must have shape {expected_shape}, got {tuple(value.shape)}"
+            )
+        return value
+
+    def _validated_pose_tensor(
+        self,
+        value: Any,
+        name: str,
+        torch: Any,
+        *,
+        device: str,
+        expected_shape: tuple[int, ...],
+    ) -> Any:
+        """Validate one packet-strided pose view without materializing a copy."""
+        value = self._validated_tensor(
+            value,
+            name,
+            torch,
+            device=device,
+            expected_shape=expected_shape,
+            require_contiguous=False,
+        )
+        shape = tuple(value.shape)
+        strides = tuple(value.stride())
+        if any(stride <= 0 for stride in strides):
+            raise ValueError(
+                f"ray tensor {name} must have positive non-overlapping strides, "
+                f"got shape {shape} with strides {strides}"
+            )
+        if strides[-1] != 1:
+            raise ValueError(f"ray tensor {name} requires an innermost stride of 1")
+        if not _has_non_overlapping_strides(shape, strides):
+            raise ValueError(
+                f"ray tensor {name} must have positive non-overlapping strides, "
+                f"got shape {shape} with strides {strides}"
+            )
+        return value
+
+    def _resolve_tensor_rows(self, env_ids: Any, torch: Any, device: str) -> Any:
+        if env_ids is None:
+            return torch.arange(self._num_envs, dtype=torch.int64, device=device)
+        if not isinstance(env_ids, torch.Tensor):
+            raise TypeError("ray tensor env_ids must be a torch.Tensor or None")
+        if env_ids.dtype != torch.int64 or env_ids.ndim != 1 or not bool(env_ids.is_contiguous()):
+            raise TypeError("ray tensor env_ids must be a contiguous 1-D int64 tensor")
+        if self._resolve_torch_device(env_ids.device, "env_ids") != device:
+            raise ValueError(f"ray tensor env_ids must live on {device}, got {env_ids.device}")
+        return env_ids
+
+    def _resolve_tensor_ray_batch(
+        self,
+        ray_origins: Any,
+        ray_directions: Any,
+        torch: Any,
+        device: str,
+        rows: int,
+    ) -> tuple[Any, Any, bool]:
+        row_count = self._num_envs if rows is None else rows
+        origins = self._validated_tensor(ray_origins, "ray_origins", torch, device=device)
+        directions = self._validated_tensor(ray_directions, "ray_directions", torch, device=device)
+        origin_shape = tuple(origins.shape)
+        if origin_shape != tuple(directions.shape):
+            raise ValueError(
+                f"ray origins shape {origin_shape} does not match directions shape "
+                f"{tuple(directions.shape)}"
+            )
+        allowed = ((self._num_rays, 3), (row_count, self._num_rays, 3))
+        if origin_shape not in allowed:
+            raise ValueError(
+                f"ray tensor batches must have one of shapes {allowed}, got {origin_shape}"
+            )
+        return origins, directions, origin_shape == (self._num_rays, 3)
+
+    def _tensor_result(
+        self,
+        torch: Any,
+        device: str,
+        rows: int,
+        hit_point: bool,
+        geom_id: bool,
+        body_id: bool,
+    ) -> RayTraceTensorResult:
+        key = (rows, hit_point, geom_id, body_id)
+        result = self._tensor_results.get(key)
+        if result is None:
+            distance = torch.empty((rows, self._num_rays), dtype=torch.float32, device=device)
+            hit = torch.empty(distance.shape, dtype=torch.bool, device=device)
+            result = RayTraceTensorResult(
+                distance=distance,
+                hit=hit,
+                hit_point=(
+                    torch.empty((*distance.shape, 3), dtype=torch.float32, device=device)
+                    if hit_point
+                    else None
+                ),
+                geom_id=(
+                    torch.empty(distance.shape, dtype=torch.int32, device=device)
+                    if geom_id
+                    else None
+                ),
+                body_id=(
+                    torch.empty(distance.shape, dtype=torch.int32, device=device)
+                    if body_id
+                    else None
+                ),
+            )
+            self._tensor_results[key] = result
+        return result
+
+    def _launch_update_aabbs(self, rows: np.ndarray) -> None:
+        """Launch the AABB refresh after pose kernels are already enqueued."""
+        if not rows.size or not self._num_geoms:
+            return
+        assert self._env_map_dev is not None
         wp.launch(
             update_aabbs_batch_kernel,
             dim=(rows.size, self._num_geoms),
@@ -491,7 +1081,7 @@ class WarpRayCaster(RayCaster):
                 self._geom_aabb_size_dev,
                 self._geom_xpos_dev,
                 self._geom_xmat_dev,
-                env_map,
+                self._env_map_dev,
                 self._aabb_lowers_dev,
                 self._aabb_uppers_dev,
             ],

@@ -275,10 +275,10 @@ def test_device_output_and_dynamic_geometry_fail_closed() -> None:
     _, mjw_model = _models(MINI_XML)
     collision = build_collision_description(mjw_model)
 
-    # Device output is not a contract capability: declared unsupported, and
-    # requesting it at creation fails closed on the unexpected kwarg.
+    # The tensor profile is selected through bind_pose_layout, not a legacy
+    # creation flag; requesting that legacy flag fails closed.
     caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
-    assert not caster.get_ray_capabilities().supports_device_output
+    assert caster.get_ray_capabilities().supports_device_output
     caster.close()
     with pytest.raises(TypeError, match="device_output"):
         uni_ray.create_ray_caster(

@@ -55,7 +55,8 @@ rebuild-path timings from `benchmarks/bench_rebuild.py`.
 
 ## Installation
 
-The package depends on `unisim-core` (the ray-query contract) and NumPy.
+The package depends on `unisim-core>=2.2.0` (the ray-query contract) and
+NumPy; the public ray-query contract is introduced by that UniSim release.
 Warp and MuJoCo are optional extras, imported lazily:
 
 ```bash
@@ -63,7 +64,8 @@ uv sync --extra warp --extra mujoco   # or just `uv sync` (dev group includes bo
 ```
 
 For local development against a sibling UniSim checkout, `pyproject.toml`
-carries `[tool.uv.sources] unisim-core = { path = "../unisim", editable = true }`.
+carries `[tool.uv.sources] unisim-core = { path = "../unisim", editable = true }`;
+that checkout may temporarily lead the published UniSim release.
 
 ## Usage
 
@@ -95,6 +97,31 @@ caster = create_ray_caster("uni_ray", num_envs=4, num_rays=64, collision=collisi
 `distance`, `hit`, and `geom_id` result arrays are views into caster-owned
 host buffers reused by the next `trace` call; copy them if you retain results
 across calls. `hit_point` and `body_id` are freshly computed per call.
+
+The same caster also serves the UniSim Torch-native tensor profile (#462):
+`bind_pose_layout` fixes the public body-name order on the cold path,
+`update_pose_tensor` aliases caller-owned float32 packet-strided pose views and
+launches pose/AABB/BVH work on the caller's current stream, and `trace_tensor`
+returns persistent Torch result views with device-side `hit_point` and
+`body_id`. Torch is a test/development dependency here and is imported lazily
+inside the tensor methods; plugin imports remain Torch-free. The tensor profile
+requires the caster device (`cpu` or `cuda:<index>`), float32 pose/ray tensors,
+and fully contiguous ray and `env_ids` tensors. Pose packet views may have
+outer-row strides, provided all strides are positive and non-overlapping and
+the component axis has stride one.
+
+The shared `(num_rays, 3)` ray profile is live: every call re-stages the values
+currently in the caller's tensors with a device-side fan-out on the caller's
+stream. Staging storage is allocated once. Per-environment `(rows, num_rays, 3)`
+inputs likewise read the caller's tensors directly on every call. Geometry is
+the only ray-scene input that requires the explicit cold-path `rebuild()`.
+
+On CUDA, invalid `env_ids` are validated by a bounded device kernel rather than
+a per-call readback. The offending trace may therefore return before its
+`ValueError` is raised; the error is surfaced at the next cold boundary
+(`close()` or `rebuild()`), together with a message identifying the prior trace.
+Duplicate and out-of-range IDs still fail closed and reset the validation
+marker; valid traces do not synchronize.
 
 To randomize geometry between episodes without recreating the caster, mutate
 the model and rebuild on the cold path (poses reset to identity, so call

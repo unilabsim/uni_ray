@@ -64,13 +64,14 @@ triangulated hfield, is bitwise identical across profiles.
 
 ## Pose-sync vs backend-owned device pose (phase-1 boundary)
 
-Phase 1 implements **host pose-sync only**: poses cross the contract as host
-NumPy through `update_pose`, identical to mjbatch. An mjwarp deployment also
-has `mujoco_warp.Data.xpos`/`xquat` living on device after FK; consuming
-those directly would avoid the host round trip, but the contract has no
-device-pose capability today (`supports_device_output` is reserved;
-`update_pose` accepts host arrays only, and requesting `device_output=True`
-fails closed on the capability surface).
+The NumPy `update_pose`/`trace` pair remains the tool/debug/conformance path.
+The tensor-native lifecycle (#462) adds the device profile:
+`bind_pose_layout` → `update_pose_tensor` → `trace_tensor`, with Torch/Warp
+zero-copy pose aliases, device-side pose/AABB/BVH kernels, persistent Torch
+outputs, and caller-owned stream/event ordering. See the root README for the
+supported tensor layouts. Backend tensor producers still pass only public
+tracked-body views; `MjData`, `mujoco_warp.Data`, Warp arrays, pointers, and
+streams never cross the ray-query boundary.
 
 Measured probe (`benchmarks/bench_device_pose_probe.py`, dense 13-body scene,
 RTX 4090, 100 iterations): reading `xpos`+`xquat` back from an mjwarp `Data`
@@ -195,8 +196,8 @@ limit (motrixsim-core 0.10.1, probed on RTX 4090 / Linux x86_64):
 ## Fail-closed surface (shared with mjbatch)
 - Unknown geom type codes raise `UnsupportedCapabilityError` at descriptor
   build (hfields are supported via cold-path triangulation).
-- `device_output=True` requests fail closed (`supports_device_output=False`;
-  the caster constructor rejects the kwarg).
+- The legacy `device_output=True` creation kwarg fails closed; the supported
+  tensor profile is selected through `bind_pose_layout` after materialization.
 - Dynamic geometry has no hot-path API: a second `materialize` fails, and
   mesh/hfield/geom-data changes require the explicit cold-path `rebuild`
   (`rebuild_caster_from_mjwarp` for the mjwarp profile).
