@@ -20,16 +20,24 @@
   closed solid `mujoco.mj_ray` intersects (top surface, skirt walls, base
   box) and bound as static meshes. Per-frame dynamic meshes fail closed with
   a clear unsupported-capability error.
+- Public collision descriptor (#472): `create_ray_caster(..., collision=RayCollisionDescription)`
+  consumes UniSim's detached mesh topology, geom/mesh identities, tags, and
+  body ancestry. Portable callers never need a backend-specific builder.
+- Rich queries (#472): one nearest-valid-hit traversal supports call-static
+  geom/body/tag filters, an inclusive `min_distance`, and optional world-space
+  against-ray normals on both host and tensor profiles.
 - Explicit cold-path rebuild: `WarpRayCaster.rebuild(...)` (or the
   `uni_ray.mjbatch.rebuild_caster_from_model` convenience) re-binds geom
   sizes/local poses and mesh/hfield data from an updated descriptor or
   MjModel without recreating the caster, so runtime geometry randomization
   is usable; the hot path keeps its body-pose-only contract.
-- Results come back through explicit host readback into persistent NumPy
-  buffers; there is intentionally no zero-copy/device-output claim.
+- The host profile reads back into persistent NumPy buffers; the tensor profile
+  returns persistent caster-owned Torch views on the caller's device and stream.
 - `uni_ray.mjbatch.build_collision_description(mj_model)` reads a
   `mujoco.MjModel` exactly once on the cold path and produces the immutable
-  `RaySceneDescription` plus mesh collision descriptor.
+  public geometry-only `RayCollisionDescription`. It remains a profile-specific
+  convenience for direct model access; portable perception callers use the
+  backend's tag/ancestry-rich public collision descriptor instead.
 - mjwarp profile (#300): `uni_ray.mjwarp.build_collision_description` sources
   the same descriptor from a compiled `mujoco_warp.Model` through the shared
   profile-neutral build, plus `uni_ray.mjwarp.create_ray_caster`
@@ -52,6 +60,9 @@ resolutions, the hot-path audit approach, and segmented CPU/GPU timings from
 tracing against mujoco-warp's public `rays` API (brute-force and BVH modes)
 from `benchmarks/bench_vs_mjwarp.py`, and records the uni_ray-only
 rebuild-path timings from `benchmarks/bench_rebuild.py`.
+`benchmarks/bench_rich_queries.py` records fixed-profile kernel and end-to-end
+tensor timings for primitives, shared meshes, and hfields with normal output and
+filter density varied.
 
 ## Installation
 
@@ -70,18 +81,24 @@ that checkout may temporarily lead the published UniSim release.
 ## Usage
 
 ```python
-import mujoco
 import numpy as np
 import uni_ray
-from uni_ray.mjbatch import build_collision_description
+from unisim.ray_query import RayTraceFilter, RayTraceOutputs
 
-model = mujoco.MjModel.from_xml_string(xml)
-collision = build_collision_description(model)   # cold path, reads MjModel once
+collision = backend.get_ray_collision_description()  # public detached descriptor
+ray_filter = RayTraceFilter(excluded_body_ids=(attachment_body_id,))
 
 caster = uni_ray.create_ray_caster(num_envs=4, num_rays=64, collision=collision)
 caster.materialize(collision.scene)
-caster.update_pose(body_pos, body_quat)          # (rows, nbody, 3) / (rows, nbody, 4) wxyz
-result = caster.trace(origins, directions, max_distance=10.0)
+caster.update_pose(body_pos, body_quat)  # (rows, nbody, 3) / (rows, nbody, 4) wxyz
+result = caster.trace(
+    origins,
+    directions,
+    max_distance=10.0,
+    min_distance=0.1,
+    ray_filter=ray_filter,
+    outputs=RayTraceOutputs(normal=True),
+)
 print(result.distance, result.hit)
 caster.close()
 ```
@@ -96,14 +113,17 @@ caster = create_ray_caster("uni_ray", num_envs=4, num_rays=64, collision=collisi
 
 `distance`, `hit`, and `geom_id` result arrays are views into caster-owned
 host buffers reused by the next `trace` call; copy them if you retain results
-across calls. `hit_point` and `body_id` are freshly computed per call.
+across calls. Normals are world-space face/side normals oriented against the
+ray. `min_distance` is inclusive, `max_distance` is exclusive, and a filtered
+or too-near hit is a normal miss.
 
 The same caster also serves the UniSim Torch-native tensor profile (#462):
 `bind_pose_layout` fixes the public body-name order on the cold path,
 `update_pose_tensor` aliases caller-owned float32 packet-strided pose views and
 launches pose/AABB/BVH work on the caller's current stream, and `trace_tensor`
-returns persistent Torch result views with device-side `hit_point` and
-`body_id`. Torch is a test/development dependency here and is imported lazily
+returns persistent Torch result views with device-side `hit_point`, `normal`,
+`geom_id`, and `body_id`, plus static filters and `min_distance`. Torch is a
+test/development dependency here and is imported lazily
 inside the tensor methods; plugin imports remain Torch-free. The tensor profile
 requires the caster device (`cpu` or `cuda:<index>`), float32 pose/ray tensors,
 and fully contiguous ray and `env_ids` tensors. Pose packet views may have
@@ -130,8 +150,8 @@ the model and rebuild on the cold path (poses reset to identity, so call
 ```python
 from uni_ray.mjbatch import rebuild_caster_from_model
 
-model.geom_size[geom_id] = [0.5, 0.4, 0.3]   # geom size / local pose / mesh edits
-rebuild_caster_from_model(caster, model)     # re-triangulates, re-uploads, rebuilds BVH
+model.geom_size[geom_id] = [0.5, 0.4, 0.3]  # geom size / local pose / mesh edits
+rebuild_caster_from_model(caster, model)  # re-triangulates, re-uploads, rebuilds BVH
 ```
 
 ## Examples

@@ -3,8 +3,7 @@
 This module is the only place uni_ray touches MuJoCo, and it does so exactly
 once per scene: it reads geom types, sizes, local poses, body ids, and static
 mesh vertex/face data out of an ``MjModel`` and freezes them into the
-backend-neutral :class:`unisim.ray_query.RaySceneDescription` plus a mesh
-collision descriptor (:class:`MjBatchCollision`) consumed by
+backend-neutral :class:`unisim.ray_query.RayCollisionDescription` consumed by
 ``uni_ray.create_ray_caster(..., collision=...)``. The ``mujoco`` import is
 lazy and confined to this module; the hot path (``update_pose``/``trace``)
 never sees an ``MjModel`` or ``MjData``.
@@ -33,7 +32,12 @@ from typing import Any
 import numpy as np
 from unisim.errors import UnsupportedCapabilityError
 from unisim.optional import OptionalDependencyError
-from unisim.ray_query import RayGeomType, RaySceneDescription
+from unisim.ray_query import (
+    RayCollisionDescription,
+    RayGeomType,
+    RayMeshDescription,
+    RaySceneDescription,
+)
 
 # MuJoCo mjtGeom numbering (stable across the mujoco>=3.2 line) mapped onto the
 # contract geometry kinds. HFIELD (1) is triangulated on the cold path and
@@ -53,7 +57,7 @@ _MJ_GEOM_MESH = 7
 
 
 @dataclass(frozen=True)
-class MeshData:
+class _MeshData:
     """One deduplicated static mesh in its geom-local frame."""
 
     points: np.ndarray
@@ -72,40 +76,6 @@ class MeshData:
         indices.setflags(write=False)
         object.__setattr__(self, "points", points)
         object.__setattr__(self, "indices", indices)
-
-
-@dataclass(frozen=True)
-class MjBatchCollision:
-    """Immutable collision descriptor consumed by ``WarpRayCaster``.
-
-    ``scene`` is the backend-neutral descriptor handed to
-    :meth:`unisim.ray_query.RayCaster.materialize`; ``meshes`` and
-    ``geom_mesh_ids`` carry the static mesh geometry the scene descriptor
-    cannot express (``geom_mesh_ids[g]`` indexes ``meshes`` for mesh geoms and
-    is ``-1`` otherwise).
-    """
-
-    scene: RaySceneDescription
-    meshes: tuple[MeshData, ...]
-    geom_mesh_ids: np.ndarray
-
-    def __post_init__(self) -> None:
-        geom_mesh_ids = np.array(self.geom_mesh_ids, dtype=np.intp, copy=True)
-        if geom_mesh_ids.shape != (self.scene.num_geoms,):
-            raise ValueError(
-                f"geom_mesh_ids must have shape ({self.scene.num_geoms},), "
-                f"got {geom_mesh_ids.shape}"
-            )
-        for geom_id, (geom_type, mesh_id) in enumerate(
-            zip(self.scene.geom_types, geom_mesh_ids)
-        ):
-            if geom_type == RayGeomType.MESH:
-                if mesh_id < 0 or mesh_id >= len(self.meshes):
-                    raise ValueError(f"mesh geom {geom_id} has invalid mesh id {mesh_id}")
-            elif mesh_id != -1:
-                raise ValueError(f"non-mesh geom {geom_id} must have mesh id -1")
-        geom_mesh_ids.setflags(write=False)
-        object.__setattr__(self, "geom_mesh_ids", geom_mesh_ids)
 
 
 @dataclass(frozen=True)
@@ -137,7 +107,7 @@ class _ModelSceneData:
     hfield_data: np.ndarray  # (nhfielddata,) float64
 
 
-def build_collision_description(mj_model: Any) -> MjBatchCollision:
+def build_collision_description(mj_model: Any) -> RayCollisionDescription:
     """Read a ``mujoco.MjModel`` once and freeze it into a collision descriptor.
 
     Plane sizes are zeroed so the caster honors the contract's infinite-plane
@@ -182,7 +152,7 @@ def _scene_data_from_mjmodel(mj_model: Any) -> _ModelSceneData:
     )
 
 
-def _build_collision_description(data: _ModelSceneData) -> MjBatchCollision:
+def _build_collision_description(data: _ModelSceneData) -> RayCollisionDescription:
     """Descriptor build shared by the mjbatch and mjwarp cold-path profiles."""
     unknown = sorted(set(data.geom_type_codes.tolist()) - set(_MJ_TO_CONTRACT_TYPES))
     if unknown:
@@ -208,10 +178,32 @@ def _build_collision_description(data: _ModelSceneData) -> MjBatchCollision:
         geom_local_quat=np.array(data.geom_quat, dtype=np.float64, copy=True),
         geom_body_ids=np.array(data.geom_body_ids, dtype=np.intp, copy=True),
     )
-    return MjBatchCollision(scene=scene, meshes=meshes, geom_mesh_ids=geom_mesh_ids)
+    return RayCollisionDescription(
+        scene=scene,
+        meshes=tuple(
+            RayMeshDescription(
+                asset_id=f"mesh:{index}",
+                points=mesh.points,
+                indices=_nondegenerate_faces(mesh.points, mesh.indices),
+            )
+            for index, mesh in enumerate(meshes)
+        ),
+        geom_mesh_ids=geom_mesh_ids,
+    )
 
 
-def _extract_meshes(data: _ModelSceneData) -> tuple[tuple[MeshData, ...], np.ndarray]:
+def _nondegenerate_faces(points: np.ndarray, indices: np.ndarray) -> np.ndarray:
+    """Drop source triangles with zero area; they have no ray surface."""
+
+    triangles = points[indices.reshape(-1, 3)]
+    areas = np.linalg.norm(
+        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        axis=1,
+    )
+    return indices.reshape(-1, 3)[areas > 0.0].reshape(-1)
+
+
+def _extract_meshes(data: _ModelSceneData) -> tuple[tuple[_MeshData, ...], np.ndarray]:
     """Slice static mesh data out of the model, deduplicated by (geom type, data id).
 
     Mesh geoms carry their compiled ``mesh_vert``/``mesh_face`` slice; hfield
@@ -220,7 +212,7 @@ def _extract_meshes(data: _ModelSceneData) -> tuple[tuple[MeshData, ...], np.nda
     """
     geom_mesh_ids = np.full(data.geom_type_codes.shape[0], -1, dtype=np.intp)
     mesh_index_by_key: dict[tuple[int, int], int] = {}
-    meshes: list[MeshData] = []
+    meshes: list[_MeshData] = []
     for geom_id, data_id in enumerate(data.geom_data_ids):
         type_code = int(data.geom_type_codes[geom_id])
         if type_code not in (_MJ_GEOM_HFIELD, _MJ_GEOM_MESH) or data_id < 0:
@@ -237,7 +229,7 @@ def _extract_meshes(data: _ModelSceneData) -> tuple[tuple[MeshData, ...], np.nda
                 points = data.mesh_vert[vert_adr : vert_adr + vert_num]
                 faces = data.mesh_face[face_adr * 3 : (face_adr + face_num) * 3]
             mesh_index_by_key[key] = len(meshes)
-            meshes.append(MeshData(points=points, indices=faces.astype(np.int32)))
+            meshes.append(_MeshData(points=points, indices=faces.astype(np.int32)))
         geom_mesh_ids[geom_id] = mesh_index_by_key[key]
     return tuple(meshes), geom_mesh_ids
 
@@ -339,23 +331,27 @@ def _triangulate_hfield(data: _ModelSceneData, hfield_id: int) -> tuple[np.ndarr
     # Base box: the full box z in [-base_z, 0] mj_ray intersects first.
     if base_z > 0.0:
         top_ring = [
-            add_vertex(px, py, 0.0)
-            for px, py in ((-rx, -ry), (rx, -ry), (rx, ry), (-rx, ry))
+            add_vertex(px, py, 0.0) for px, py in ((-rx, -ry), (rx, -ry), (rx, ry), (-rx, ry))
         ]
         bottom_ring = [
-            add_vertex(px, py, -base_z)
-            for px, py in ((-rx, -ry), (rx, -ry), (rx, ry), (-rx, ry))
+            add_vertex(px, py, -base_z) for px, py in ((-rx, -ry), (rx, -ry), (rx, ry), (-rx, ry))
         ]
         t0, t1, t2, t3 = top_ring
         b0, b1, b2, b3 = bottom_ring
         extra_faces.extend(
             [
-                (t0, t1, t2), (t0, t2, t3),  # top (z = 0), as mj_ray reports it
-                (b0, b2, b1), (b0, b3, b2),  # bottom
-                (b0, b1, t1), (b0, t1, t0),  # y = -ry side
-                (b1, b2, t2), (b1, t2, t1),  # x = +rx side
-                (b2, b3, t3), (b2, t3, t2),  # y = +ry side
-                (b3, b0, t0), (b3, t0, t3),  # x = -rx side
+                (t0, t1, t2),
+                (t0, t2, t3),  # top (z = 0), as mj_ray reports it
+                (b0, b2, b1),
+                (b0, b3, b2),  # bottom
+                (b0, b1, t1),
+                (b0, t1, t0),  # y = -ry side
+                (b1, b2, t2),
+                (b1, t2, t1),  # x = +rx side
+                (b2, b3, t3),
+                (b2, t3, t2),  # y = +ry side
+                (b3, b0, t0),
+                (b3, t0, t3),  # x = -rx side
             ]
         )
 
@@ -363,15 +359,13 @@ def _triangulate_hfield(data: _ModelSceneData, hfield_id: int) -> tuple[np.ndarr
         all_points = np.concatenate(
             [points, np.array(extra_points, dtype=np.float32).reshape(-1, 3)]
         )
-        all_faces = np.concatenate(
-            [faces, np.array(extra_faces, dtype=np.int32).reshape(-1)]
-        )
+        all_faces = np.concatenate([faces, np.array(extra_faces, dtype=np.int32).reshape(-1)])
     else:
         all_points, all_faces = points, faces
     return all_points, all_faces.astype(np.int32)
 
 
-def rebuild_caster_from_model(caster: Any, mj_model: Any) -> MjBatchCollision:
+def rebuild_caster_from_model(caster: Any, mj_model: Any) -> RayCollisionDescription:
     """Re-read an updated ``MjModel`` and rebuild ``caster``'s scene (cold path).
 
     Convenience for geometry randomization: mutate geom sizes/local poses,
@@ -390,8 +384,6 @@ def rebuild_caster_from_model(caster: Any, mj_model: Any) -> MjBatchCollision:
 
 
 __all__ = [
-    "MeshData",
-    "MjBatchCollision",
     "build_collision_description",
     "rebuild_caster_from_model",
 ]

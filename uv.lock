@@ -711,7 +711,7 @@ wheels = [
 
 [[package]]
 name = "mujoco-warp"
-version = "3.14.0"
+version = "3.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py", version = "2.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -724,9 +724,9 @@ dependencies = [
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "warp-lang" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/78/5b8063303f9108a0849bb5a502692a6f0e5b235c78561490aa5c7ca584ed/mujoco_warp-3.14.0.tar.gz", hash = "sha256:1b4b565592951c7312fcb0f172ab446f2622e51a49ce985a1f1b733ef3b268c7", size = 2137476, upload-time = "2026-09-22T17:29:30.238Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/02/da883029b3661619651d0e2469ec17df92dd64ca5de25119886d516ee1de/mujoco_warp-3.11.0.tar.gz", hash = "sha256:e9e521a3809b95baa98c44bd4fcaccb035b5c700e2616efc52ebc33d29ae2eef", size = 2075418, upload-time = "2026-07-28T01:21:41.987Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/9d/2233955f4ce9c8c52ac5df8b915fae953c4deb27469a2f0ceae0fe858a9a/mujoco_warp-3.14.0-py3-none-any.whl", hash = "sha256:77a3e2b041ef7f7b3d2a41b1686672eec27aebd766eafcc22db8af564b821306", size = 2214960, upload-time = "2026-09-22T17:29:28.729Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/03/9bf86946c755a9a020c1bea587841472b0206351f73f67e41050fcb2a20c/mujoco_warp-3.11.0-py3-none-any.whl", hash = "sha256:97e77e877c1c2ea064ae68eaace2333dec94f2d8984091ba7b383bc8c34958f6", size = 2153348, upload-time = "2026-07-28T01:21:40.18Z" },
 ]
 
 [[package]]
@@ -1494,7 +1494,7 @@ provides-extras = ["warp", "mujoco", "motrix", "viz"]
 [package.metadata.requires-dev]
 dev = [
     { name = "mujoco", specifier = ">=3.2.0" },
-    { name = "mujoco-warp" },
+    { name = "mujoco-warp", specifier = "~=3.11.0" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },

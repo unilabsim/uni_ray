@@ -95,8 +95,9 @@ def test_hfield_geom_is_triangulated_into_a_static_mesh() -> None:
     # Top surface: 6 grid vertices (ported triangulation), then skirt-wall and
     # base-box vertices for the closed mj_ray solid.
     assert mesh.points.shape == (6 + 24 + 8, 3)
-    # 4 top triangles + 12 skirt + 12 base box.
-    assert mesh.indices.shape == ((4 + 12 + 12) * 3,)
+    # 4 top triangles + 12 skirt + 12 base box, minus 4 zero-area skirt
+    # triangles dropped by the public mesh descriptor.
+    assert mesh.indices.shape == ((4 + 12 + 12 - 4) * 3,)
     # Geom-local frame: x in [-2, 2] (ncol), y in [-1, 1] (nrow),
     # z = elevation * 0.5; the base box reaches z = -0.1 (size[3]). MuJoCo
     # compiles the XML elevation text with the first row at +y (the compiled
@@ -114,9 +115,7 @@ def test_hfield_geom_is_triangulated_into_a_static_mesh() -> None:
         ],
         atol=1e-6,
     )
-    np.testing.assert_array_equal(
-        mesh.indices[:12], [0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4]
-    )
+    np.testing.assert_array_equal(mesh.indices[:12], [0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4])
     assert mesh.points[:, 2].min() == pytest.approx(-0.1)
     assert mesh.points[:, 0].min() >= -2.0 and mesh.points[:, 0].max() <= 2.0
     assert mesh.points[:, 1].min() >= -1.0 and mesh.points[:, 1].max() <= 1.0

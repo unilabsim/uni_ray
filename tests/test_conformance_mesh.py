@@ -156,3 +156,38 @@ def test_static_mesh_scene_matches_mj_ray() -> None:
         assert set(result.geom_id[0][cpu_hit].cpu().unique().tolist()) == {0, 1}
     finally:
         caster.close()
+
+
+def test_mesh_face_normal_matches_geometric_reference() -> None:
+    xml = """
+    <mujoco>
+      <asset>
+        <mesh name='tetra' vertex='0 0 0  1 0 0  0 1 0  0 0 1'
+              face='0 2 1  0 1 3  0 3 2  1 2 3'/>
+      </asset>
+      <worldbody><geom type='mesh' mesh='tetra'/></worldbody>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    collision = build_collision_description(model)
+    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    caster.materialize(collision.scene)
+    try:
+        centroid = np.array([1.0, 1.0, 1.0]) / 3.0
+        origin = np.array([[2.0, 2.0, 2.0]])
+        direction = centroid[None, :] - origin
+        direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+        result = caster.trace(
+            origin,
+            direction,
+            10.0,
+            outputs=RayTraceOutputs(normal=True, geom_id=True),
+        )
+        expected = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
+        assert result.hit.item()
+        assert result.geom_id.item() == 0
+        np.testing.assert_allclose(result.normal[0, 0], expected, atol=2 * ATOL)
+    finally:
+        caster.close()

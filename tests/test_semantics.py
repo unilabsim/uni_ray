@@ -113,11 +113,15 @@ def test_zero_geom_scene_traces_as_all_miss() -> None:
     try:
         caster.update_pose(np.zeros((2, 1, 3)), np.tile([1.0, 0.0, 0.0, 0.0], (2, 1, 1)))
         result = caster.trace(
-            np.zeros((4, 3)), np.tile(np.array([[0.0, 0.0, -1.0]]), (4, 1)), max_distance=2.0
+            np.zeros((4, 3)),
+            np.tile(np.array([[0.0, 0.0, -1.0]]), (4, 1)),
+            max_distance=2.0,
+            outputs=RayTraceOutputs(hit_point=True, normal=True, geom_id=True, body_id=True),
         )
         assert result.distance.shape == (2, 4)
         assert not result.hit.any()
         assert np.all(result.distance == np.float32(2.0))
+        assert np.all(result.body_id == -1)
     finally:
         caster.close()
 
@@ -140,7 +144,7 @@ def test_materialize_rejects_wrong_types_and_sizes() -> None:
 
 
 def test_collision_descriptor_mismatch_fails(caster, scene: RaySceneDescription) -> None:
-    from uni_ray.mjbatch import MjBatchCollision
+    from unisim.ray_query import RayCollisionDescription
 
     other_scene = RaySceneDescription(
         num_bodies=1,
@@ -150,7 +154,7 @@ def test_collision_descriptor_mismatch_fails(caster, scene: RaySceneDescription)
         geom_local_quat=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)),
         geom_body_ids=np.zeros(2, dtype=np.intp),
     )
-    mismatch = MjBatchCollision(
+    mismatch = RayCollisionDescription(
         scene=other_scene, meshes=(), geom_mesh_ids=np.full(2, -1, dtype=np.intp)
     )
     fresh = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=mismatch)

@@ -7,6 +7,8 @@ appropriately.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from unisim.errors import BackendError, UnsupportedCapabilityError
@@ -20,6 +22,7 @@ from unisim.ray_query import (
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
 import uni_ray  # noqa: E402
+from uni_ray.warp_caster import WarpRayCaster  # noqa: E402
 
 
 @pytest.fixture()
@@ -142,9 +145,7 @@ def test_trace_before_materialize_fails(scene: RaySceneDescription) -> None:
     caster.close()
 
 
-def test_close_is_idempotent_and_later_queries_fail(
-    caster, scene: RaySceneDescription
-) -> None:
+def test_close_is_idempotent_and_later_queries_fail(caster, scene: RaySceneDescription) -> None:
     caster.close()
     caster.close()
     origins, directions = _down_rays()
@@ -164,15 +165,44 @@ def test_mesh_geom_without_collision_descriptor_fails_closed() -> None:
         geom_body_ids=np.array([0]),
     )
     caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
-    with pytest.raises(UnsupportedCapabilityError, match="collision descriptor"):
+    with pytest.raises(UnsupportedCapabilityError, match="RayCollisionDescription"):
         caster.materialize(mesh_scene)
     caster.close()
 
 
-def test_undeclared_output_request_fails_closed(caster) -> None:
+def test_optional_normal_output_is_served(caster) -> None:
     origins, directions = _down_rays()
-    with pytest.raises(UnsupportedCapabilityError):
-        caster.trace(origins, directions, max_distance=10.0, outputs=RayTraceOutputs(normal=True))
+    result = caster.trace(
+        origins, directions, max_distance=10.0, outputs=RayTraceOutputs(normal=True)
+    )
+    assert result.normal is not None
+    np.testing.assert_allclose(
+        result.normal[0],
+        [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]],
+        atol=1e-6,
+    )
+
+
+def test_undeclared_normal_output_fails_closed(scene: RaySceneDescription) -> None:
+    class _NoHostNormalCaster(WarpRayCaster):
+        _ray_capabilities = dataclasses.replace(
+            WarpRayCaster._ray_capabilities, supports_host_normal=False
+        )
+
+    caster = _NoHostNormalCaster(num_envs=1, num_rays=1)
+    try:
+        caster.materialize(scene)
+        origins = np.array([[0.0, 0.0, 2.0]])
+        directions = np.array([[0.0, 0.0, -1.0]])
+        with pytest.raises(UnsupportedCapabilityError, match="normal"):
+            caster.trace(
+                origins,
+                directions,
+                max_distance=10.0,
+                outputs=RayTraceOutputs(normal=True),
+            )
+    finally:
+        caster.close()
 
 
 def test_invalid_batch_arguments_fail_closed(caster) -> None:
@@ -184,9 +214,7 @@ def test_invalid_batch_arguments_fail_closed(caster) -> None:
     with pytest.raises(ValueError, match="environment IDs"):
         caster.trace(origins, directions, max_distance=10.0, env_ids=[5])
     with pytest.raises(ValueError, match="unit wxyz"):
-        caster.update_pose(
-            np.zeros((2, 2, 3)), np.zeros((2, 2, 4))
-        )
+        caster.update_pose(np.zeros((2, 2, 3)), np.zeros((2, 2, 4)))
 
 
 def test_result_buffers_are_reused_views(caster) -> None:

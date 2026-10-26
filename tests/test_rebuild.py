@@ -15,7 +15,7 @@ import dataclasses
 import numpy as np
 import pytest
 from unisim.errors import BackendError
-from unisim.ray_query import RayGeomType, RayTraceOutputs
+from unisim.ray_query import RayGeomType, RayTraceFilter, RayTraceOutputs
 
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the rebuild tests")
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
@@ -213,11 +213,21 @@ def test_rebuild_resets_body_poses_to_identity() -> None:
 def test_rebuild_validation() -> None:
     model, _, collision, caster = _make_caster(BASE_XML)
 
+    caster.trace(
+        RAY_ORIGINS,
+        RAY_DIRECTIONS,
+        max_distance=10.0,
+        ray_filter=RayTraceFilter(allowed_geom_ids=(0,)),
+    )
+    assert caster._filter_masks
+    caster.rebuild(collision)
+    assert not caster._filter_masks
+
     with pytest.raises(ValueError, match="exactly one"):
         caster.rebuild()
     with pytest.raises(ValueError, match="exactly one"):
         caster.rebuild(collision, scene=collision.scene)
-    with pytest.raises(TypeError, match="MjBatchCollision"):
+    with pytest.raises(TypeError, match="RayCollisionDescription"):
         caster.rebuild(object())
 
     # scene= with a geom count that no longer matches the bound collision.
@@ -231,6 +241,13 @@ def test_rebuild_validation() -> None:
     )
     with pytest.raises(ValueError, match="does not match"):
         caster.rebuild(scene=shrunk)
+
+    same_count_changed_type = dataclasses.replace(
+        collision.scene,
+        geom_types=(RayGeomType.SPHERE, *collision.scene.geom_types[1:]),
+    )
+    with pytest.raises(ValueError, match="only geom sizes"):
+        caster.rebuild(scene=same_count_changed_type)
 
     fresh = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
     with pytest.raises(BackendError, match="materialized"):

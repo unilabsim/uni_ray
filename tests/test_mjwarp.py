@@ -240,16 +240,12 @@ def test_rebuild_caster_from_mjwarp() -> None:
 
     caster = create_ray_caster(mjw_model, num_envs=num_envs, num_rays=origins.shape[0])
     caster.update_pose(body_pos, body_quat)
-    before = np.array(
-        caster.trace(origins, directions, max_distance=10.0).distance, copy=True
-    )
+    before = np.array(caster.trace(origins, directions, max_distance=10.0).distance, copy=True)
 
     collision_v2 = rebuild_caster_from_mjwarp(caster, mjw_model_v2)
     assert caster._collision is collision_v2
     caster.update_pose(body_pos, body_quat)
-    after = np.array(
-        caster.trace(origins, directions, max_distance=10.0).distance, copy=True
-    )
+    after = np.array(caster.trace(origins, directions, max_distance=10.0).distance, copy=True)
     # The scaled tet mesh moves the hit distances of the rays aimed at it.
     mesh_rays = (origins[:, 0] > 2.0) & (np.abs(origins[:, 1]) < 1.5)
     assert np.any(~np.isclose(before[:, mesh_rays], after[:, mesh_rays], atol=ATOL))
@@ -281,9 +277,7 @@ def test_device_output_and_dynamic_geometry_fail_closed() -> None:
     assert caster.get_ray_capabilities().supports_device_output
     caster.close()
     with pytest.raises(TypeError, match="device_output"):
-        uni_ray.create_ray_caster(
-            num_envs=1, num_rays=1, collision=collision, device_output=True
-        )
+        uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision, device_output=True)
 
     # Dynamic geometry outside the explicit cold-path rebuild has no API:
     # re-materializing a bound caster (geometry change without rebuild) fails.

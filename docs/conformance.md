@@ -14,13 +14,17 @@ The caster computes in float32 on device; the CPU reference
 (`mujoco.mj_ray`) is float64. All sweeps use the fixed tolerance
 **`ATOL = 1e-4`** on hit distances, with strict hit/miss and nearest-geom-id
 agreement (a geom-id mismatch is only accepted when both backends report tied
-distances within tolerance).
+distances within tolerance). Primitive normal parity uses `mju_rayGeom` with a
+fixed `1e-3` component tolerance; exact shared-edge rays are excluded because
+either adjacent face normal is geometrically valid.
 
 | Sweep | Rays | Worst observed \|Δt\| | Tolerance |
 |---|---|---|---|
 | Primitive scene, 6 random freejoint poses × 2 envs (`tests/test_conformance_primitives.py`) | 6144 | 5.16e-05 | 1e-4 |
 | Capsule/cylinder rotated axes, 2000 random rays (mirrors MuJoCo-LiDAR's `test_warp_backend_capsule_cylinder_match_cpu`) | 2000 (73 hits, misses agree) | 4.31e-06 | 1e-4 |
 | Static meshes (triangulated UV sphere + tetrahedron, `tests/test_conformance_mesh.py`) | 1024 (654 hits, misses agree) | 1.72e-06 | 1e-4 |
+| Primitive normals vs `mju_rayGeom` | 6144 hits + 2000-ray capsule/cylinder sweep | 1.0e-3 component tolerance | 1e-3 |
+| Mesh/hfield face normals vs public descriptor geometry | 1 known face each | 2e-4 / 1e-5 | 2e-4 / 1e-5 |
 
 Measured on warp-lang 1.17.0 / mujoco 3.14.0 / RTX 4090.
 
@@ -67,6 +71,15 @@ profiles, batch shape validation, double-materialize/closed-caster failures,
 are views into reused caster-owned buffers; `hit_point`/`body_id` are fresh
 per call), empty selections, and zero-geom scenes (all-miss).
 
+`tests/test_rich_queries.py` pins the #472 rich-query path: a public
+`RayCollisionDescription` materializes without a backend-specific builder, static tags
+and `min_distance` select the nearest valid hit behind a rejected candidate,
+host/tensor normals agree, and a two-layer mesh returns the second surface when
+the first lies below `min_distance`. Native primitive normals are checked
+against `mju_rayGeom`; known mesh and hfield faces check the public descriptor's
+geometric face normal. `tests/test_hfield.py` adds the same
+filter/minimum-distance/normal host-tensor parity on a public hfield descriptor.
+
 ## Hot-path audits
 
 `tests/test_hotpath.py` proves, as executable tests:
@@ -84,6 +97,9 @@ per call), empty selections, and zero-geom scenes (all-miss).
   hot path never invokes the cold-path rebuild. Bounded per-call host-side
   NumPy work (input validation/staging, `hit_point`/`body_id` computation)
   is by design.
+- The hot-path iteration also requests normals, applies a static geom filter,
+  and sets `min_distance`; after the first filter mask upload, the same zero
+  allocation/rebuild invariant holds.
 
 ## Hfield support (#2)
 
@@ -112,6 +128,10 @@ device tolerance, not an approximation budget. Hfield throughput vs
 mujoco-warp is benchmarked in docs/benchmark-mjwarp.md (including the
 finding that mujoco-warp's BVH ray mode covers only the hfield top surface);
 the segmented hfield timings are in the table below.
+
+The public hfield descriptor test additionally verifies tensor/host parity for
+distance, hit, geom ID, and finite unit normals under a static filter and
+`min_distance=0.05`.
 
 ## Explicit rebuild path (#2)
 
@@ -174,6 +194,34 @@ validation and staging of the ray batch (float64 checks, broadcast
 materialization), which is the contract-mandated input checking cost, not
 kernel time. BVH refit is essentially free at this scene size (0.04–0.05 ms).
 
+## Rich-query tensor performance (#472)
+
+`benchmarks/bench_rich_queries.py` fixes the device, Warp version, batch,
+distance window, geometry profile, normal request, and filter density. It
+reports sync-scoped intersection-kernel launch time separately from
+end-to-end `trace_tensor` (it is not a pure CUDA-event kernel measurement);
+literal continuation is disabled because #472 uses nearest-valid-hit semantics.
+This is a fixed-profile regression measurement, not a throughput or convergence
+claim.
+
+Recorded on RTX 4090, Warp 1.17.0, CUDA Toolkit 12.9, batch 256×512,
+`max_distance=10.0`, `min_distance=0.1`, 20 timed iterations:
+
+| geometry | geoms | normal | filter density | intersection kernel (ms) | `trace_tensor` e2e (ms) | hit fraction |
+|---|---:|---|---:|---:|---:|---:|
+| primitives | 6 | false | 1.0 | 0.069 | 0.142 | 1.000 |
+| primitives | 6 | false | 0.5 | 0.229 | 0.131 | 1.000 |
+| primitives | 6 | true | 1.0 | 0.091 | 0.144 | 1.000 |
+| primitives | 6 | true | 0.5 | 0.149 | 0.139 | 1.000 |
+| shared-mesh | 5 | false | 1.0 | 0.534 | 0.696 | 1.000 |
+| shared-mesh | 5 | false | 0.5 | 0.383 | 0.384 | 1.000 |
+| shared-mesh | 5 | true | 1.0 | 0.491 | 0.665 | 1.000 |
+| shared-mesh | 5 | true | 0.5 | 0.325 | 0.458 | 1.000 |
+| hfield | 1 | false | 1.0 | 0.270 | 0.328 | 1.000 |
+| hfield | 1 | false | 0.5 | 0.265 | 0.476 | 1.000 |
+| hfield | 1 | true | 1.0 | 0.269 | 0.333 | 1.000 |
+| hfield | 1 | true | 0.5 | 0.416 | 0.348 | 1.000 |
+
 ## CI-skip discipline
 
 GPU/runtime tests skip cleanly when warp, mujoco, or CUDA are absent:
@@ -187,8 +235,9 @@ and import-boundary tests always run.
 
 - float32 device math; worst observed distance error 5.2e-05 on the
   primitive sweep (tolerance 1e-4).
-- Normals are not computed (`supports_normal = False`); requesting them
-  fails closed.
+- Normals are optional and split by transport (`supports_host_normal` /
+  `supports_tensor_normal`); mesh normals are geometric face normals, not
+  smooth normals.
 - Per-frame dynamic meshes (vertex streaming without a rebuild) fail closed;
   mesh/hfield data changes require the explicit cold-path rebuild.
 - Hfield ray hits match `mj_rayHfield`'s solid model, which includes the

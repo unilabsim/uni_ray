@@ -9,10 +9,11 @@ from typing import Any
 
 import numpy as np
 import pytest
-from unisim.errors import BackendError, UnsupportedCapabilityError
+from unisim.errors import BackendError
 from unisim.ray_query import (
     RayPoseTensorView,
     RaySceneDescription,
+    RayTraceFilter,
     RayTraceOutputs,
     RayTraceTensorResult,
 )
@@ -227,8 +228,10 @@ def test_trace_validation_and_hidden_contiguous_is_rejected(caster: Any) -> None
             2.0,
             env_ids=torch.tensor([0], dtype=torch.int32),
         )
-    with pytest.raises(UnsupportedCapabilityError, match="normal"):
-        caster.trace_tensor(origins, directions, 2.0, outputs=RayTraceOutputs(normal=True))
+    normal_result = caster.trace_tensor(
+        origins, directions, 2.0, outputs=RayTraceOutputs(normal=True)
+    )
+    assert normal_result.normal is not None
     with pytest.raises(ValueError, match="does not match"):
         caster.trace_tensor(origins[1:], directions, 2.0)
     with pytest.raises(ValueError, match="one of shapes"):
@@ -266,6 +269,47 @@ def test_trace_validation_and_hidden_contiguous_is_rejected(caster: Any) -> None
         torch.Tensor.contiguous = contiguous
         torch.Tensor.cpu = tensor_cpu
     _synchronize()
+
+
+def test_minimal_tensor_output_omits_internal_geom_scratch(caster: Any) -> None:
+    caster.update_pose_tensor(_pose(caster))
+    origins, directions = _rays(caster._required_tensor_device())
+    result = caster.trace_tensor(origins, directions, 10.0)
+    selected = caster.trace_tensor(
+        origins.unsqueeze(0).repeat(2, 1, 1)[1:],
+        directions.unsqueeze(0).repeat(2, 1, 1)[1:],
+        10.0,
+        env_ids=torch.tensor([1], dtype=torch.int64, device=origins.device),
+    )
+    _synchronize()
+    assert result.geom_id is None
+    assert selected.geom_id is None
+    assert result.distance.shape == (2, 3)
+    assert selected.distance.shape == (1, 3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA stream ordering required")
+def test_first_use_static_filter_follows_caller_stream(scene: RaySceneDescription) -> None:
+    local = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
+    local.materialize(scene)
+    local.bind_pose_layout(scene.body_names)
+    local.update_pose_tensor(_pose(local))
+    origins, directions = _rays("cuda:0")
+    stream = torch.cuda.Stream(device=origins.device)
+    with torch.cuda.stream(stream):
+        producer = origins * 1.0
+        directions = directions * 1.0
+        result = local.trace_tensor(
+            producer,
+            directions,
+            10.0,
+            min_distance=0.1,
+            ray_filter=RayTraceFilter(allowed_geom_ids=(0, 1)),
+        )
+        consumer = result.distance * 2.0
+    stream.synchronize()
+    assert torch.isfinite(consumer).all()
+    local.close()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA deferred validation required")
@@ -313,7 +357,7 @@ def test_shared_ray_pattern_is_reuploaded_each_call(caster: Any) -> None:
 def test_shared_per_env_selected_and_result_reuse(caster: Any) -> None:
     caster.update_pose_tensor(_pose(caster))
     origins, directions = _rays(caster._required_tensor_device())
-    outputs = RayTraceOutputs(hit_point=True, geom_id=True, body_id=True)
+    outputs = RayTraceOutputs(hit_point=True, normal=True, geom_id=True, body_id=True)
     full = caster.trace_tensor(origins, directions, 10.0, outputs=outputs)
     selected_ids = torch.tensor([1], dtype=torch.int64, device=origins.device)
     selected = caster.trace_tensor(
@@ -350,7 +394,8 @@ def test_tensor_host_parity_and_allocation_audit(
     caster: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     origins, directions = _rays(caster._required_tensor_device())
-    outputs = RayTraceOutputs(hit_point=True, geom_id=True, body_id=True)
+    outputs = RayTraceOutputs(hit_point=True, normal=True, geom_id=True, body_id=True)
+    ray_filter = RayTraceFilter(allowed_geom_ids=(0, 1))
 
     # ``wp.from_torch`` and zero-copy ``wp.array`` wrappers are metadata objects;
     # spy on the storage-allocating constructors instead.
@@ -360,14 +405,28 @@ def test_tensor_host_parity_and_allocation_audit(
         monkeypatch.setattr(wp, name, spy)
     # Warm up lazy Warp kernel compilation and one-time output/staging profiles.
     caster.update_pose_tensor(_pose(caster))
-    tensor_result = caster.trace_tensor(origins, directions, 7.0, outputs=outputs)
+    tensor_result = caster.trace_tensor(
+        origins,
+        directions,
+        7.0,
+        outputs=outputs,
+        min_distance=0.1,
+        ray_filter=ray_filter,
+    )
     _synchronize()
     steady_pose = _pose(caster)
     for name, spy in allocation_spies.items():
         spy.calls = 0
     for _ in range(3):
         caster.update_pose_tensor(steady_pose)
-        tensor_result = caster.trace_tensor(origins, directions, 7.0, outputs=outputs)
+        tensor_result = caster.trace_tensor(
+            origins,
+            directions,
+            7.0,
+            outputs=outputs,
+            min_distance=0.1,
+            ray_filter=ray_filter,
+        )
     _synchronize()
     for name, spy in allocation_spies.items():
         assert spy.calls == 0, f"tensor hot path called wp.{name} {spy.calls} times"
@@ -378,6 +437,8 @@ def test_tensor_host_parity_and_allocation_audit(
         directions.detach().cpu().numpy(),
         7.0,
         outputs=outputs,
+        min_distance=0.1,
+        ray_filter=ray_filter,
     )
     _synchronize()
     torch.testing.assert_close(
@@ -387,6 +448,12 @@ def test_tensor_host_parity_and_allocation_audit(
     torch.testing.assert_close(
         tensor_result.hit_point,
         torch.as_tensor(host_result.hit_point, dtype=torch.float32).to(origins.device),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    torch.testing.assert_close(
+        tensor_result.normal,
+        torch.as_tensor(host_result.normal, dtype=torch.float32).to(origins.device),
         rtol=2e-6,
         atol=2e-6,
     )
@@ -402,8 +469,15 @@ def test_tensor_host_parity_and_allocation_audit(
     # CUDA memory stats do not distinguish allocator/cache effects sufficiently for a
     # strict bytes assertion here. Pin the allocation-audit invariant structurally: the
     # second identical profile returns exactly the same caster-owned storages.
-    steady = caster.trace_tensor(origins, directions, 7.0, outputs=outputs)
-    for name in ("distance", "hit", "hit_point", "geom_id", "body_id"):
+    steady = caster.trace_tensor(
+        origins,
+        directions,
+        7.0,
+        outputs=outputs,
+        min_distance=0.1,
+        ray_filter=ray_filter,
+    )
+    for name in ("distance", "hit", "hit_point", "normal", "geom_id", "body_id"):
         assert getattr(steady, name) is getattr(tensor_result, name), name
 
 
@@ -442,9 +516,17 @@ def test_cuda_tensor_trace_has_no_hidden_transfers_or_synchronizations(
     local.bind_pose_layout(scene.body_names)
     pose = _pose(local, packet=True)
     origins, directions = _rays("cuda:0")
-    outputs = RayTraceOutputs(hit_point=True, geom_id=True, body_id=True)
+    outputs = RayTraceOutputs(hit_point=True, normal=True, geom_id=True, body_id=True)
+    ray_filter = RayTraceFilter(allowed_geom_ids=(0, 1))
     local.update_pose_tensor(pose)
-    local.trace_tensor(origins, directions, 7.0, outputs=outputs)
+    local.trace_tensor(
+        origins,
+        directions,
+        7.0,
+        outputs=outputs,
+        min_distance=0.1,
+        ray_filter=ray_filter,
+    )
     torch.cuda.synchronize()
 
     copy_spy = _AllocationSpy(wp.copy)
@@ -460,7 +542,14 @@ def test_cuda_tensor_trace_has_no_hidden_transfers_or_synchronizations(
 
     for _ in range(3):
         local.update_pose_tensor(pose)
-        local.trace_tensor(origins, directions, 7.0, outputs=outputs)
+        local.trace_tensor(
+            origins,
+            directions,
+            7.0,
+            outputs=outputs,
+            min_distance=0.1,
+            ray_filter=ray_filter,
+        )
 
     monkeypatch.undo()
     torch.cuda.synchronize()

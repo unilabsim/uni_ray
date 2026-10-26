@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from unisim.ray_query import RayTraceOutputs
+from unisim.backend.ray_scene import ray_collision_from_mujoco_model
+from unisim.ray_query import RayTraceFilter, RayTraceOutputs
 
 torch = pytest.importorskip("torch", reason="torch is required for the tensor hfield path")
 
@@ -156,8 +157,110 @@ def test_hfield_lifecycle_and_correctness_vs_mj_ray() -> None:
     np.testing.assert_allclose(uni_distances[ref_hit], ref_distances[ref_hit], atol=ATOL)
     assert ref_hit.any() and (~ref_hit).any()  # the sweep exercises hits and misses
     caster.close()
+
+
+def test_public_hfield_descriptor_supports_rich_tensor_query_parity() -> None:
+    model = mujoco.MjModel.from_xml_string(TERRAIN_XML)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    collision = ray_collision_from_mujoco_model(model)
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    caster = uni_ray.create_ray_caster(
+        num_envs=1, num_rays=NUM_RAYS, collision=collision, device=device
+    )
+    caster.materialize(collision.scene)
+    caster.bind_pose_layout(collision.scene.body_names)
+    pos, quat = _packed_pose_tensors(
+        np.asarray(data.xpos)[None], np.asarray(data.xquat)[None], device
+    )
+    caster.update_pose_tensor(RayPoseTensorView(collision.scene.body_names, pos, quat))
+
+    origins, directions = _rays()
+    ray_filter = RayTraceFilter(allowed_geom_ids=(0,))
+    outputs = RayTraceOutputs(normal=True, geom_id=True)
+    tensor_result = caster.trace_tensor(
+        torch.tensor(origins, dtype=torch.float32, device=device),
+        torch.tensor(directions, dtype=torch.float32, device=device),
+        10.0,
+        outputs=outputs,
+        min_distance=0.05,
+        ray_filter=ray_filter,
+    )
+    host_result = caster.trace(
+        origins,
+        directions,
+        10.0,
+        outputs=outputs,
+        min_distance=0.05,
+        ray_filter=ray_filter,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(
+        tensor_result.distance,
+        torch.as_tensor(host_result.distance, dtype=torch.float32, device=device),
+        rtol=2e-5,
+        atol=2e-5,
+    )
+    torch.testing.assert_close(tensor_result.hit, torch.as_tensor(host_result.hit, device=device))
+    torch.testing.assert_close(
+        tensor_result.geom_id,
+        torch.as_tensor(host_result.geom_id, dtype=torch.int32, device=device),
+    )
+    assert tensor_result.normal is not None
+    torch.testing.assert_close(
+        tensor_result.normal,
+        torch.as_tensor(host_result.normal, dtype=torch.float32, device=device),
+        rtol=2e-5,
+        atol=2e-5,
+    )
+    assert torch.isfinite(tensor_result.normal[tensor_result.hit]).all()
+    normal_lengths = torch.linalg.vector_norm(tensor_result.normal, dim=-1)
+    torch.testing.assert_close(
+        normal_lengths[tensor_result.hit],
+        torch.ones_like(normal_lengths[tensor_result.hit]),
+        rtol=2e-4,
+        atol=2e-5,
+    )
+    caster.close()
+
+
+def test_public_hfield_descriptor_returns_native_face_normal() -> None:
+    xml = """
+    <mujoco>
+      <asset>
+        <hfield name='terrain' nrow='2' ncol='2' size='1 1 0.5 0.2'
+                elevation='0 1  1 0'/>
+      </asset>
+      <worldbody><geom type='hfield' hfield='terrain'/></worldbody>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    collision = ray_collision_from_mujoco_model(model)
+    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    caster.materialize(collision.scene)
+    try:
+        origin = np.array([[-0.75, -0.875, 2.0]])
+        direction = np.array([[0.0, 0.0, -1.0]])
+        result = caster.trace(
+            origin,
+            direction,
+            10.0,
+            outputs=RayTraceOutputs(normal=True, geom_id=True),
+        )
+        expected_normal = np.array([0.25, -0.25, 1.0])
+        expected_normal /= np.linalg.norm(expected_normal)
+        assert result.hit.item()
+        assert result.geom_id.item() == 0
+        assert result.distance.item() == pytest.approx(1.53125, abs=1e-5)
+        np.testing.assert_allclose(result.normal[0, 0], expected_normal, atol=1e-5)
+    finally:
+        caster.close()
     with pytest.raises(Exception, match="closed"):
-        caster.trace(origins, directions, max_distance=10.0)
+        caster.trace(origin, direction, max_distance=10.0)
 
 
 def test_hfield_geom_pose_follows_body_pose() -> None:
