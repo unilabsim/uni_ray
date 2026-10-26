@@ -265,7 +265,7 @@ def test_device_output_and_dynamic_geometry_fail_closed() -> None:
     collision = build_collision_description(model)
 
     caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
-    assert not caster.get_ray_capabilities().supports_device_output
+    assert caster.get_ray_capabilities().supports_device_output
     caster.close()
     with pytest.raises(TypeError, match="device_output"):
         uni_ray.create_ray_caster(

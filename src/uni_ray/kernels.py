@@ -163,6 +163,131 @@ def write_body_poses_kernel(
 
 
 @wp.kernel
+def write_body_poses_from_tensors_kernel(
+    body_xpos: wp.array2d(dtype=wp.vec3),
+    body_xquat: wp.array2d(dtype=wp.quat),
+    pos_w: wp.array3d(dtype=wp.float32),
+    quat_w: wp.array3d(dtype=wp.float32),
+):
+    """Alias public full-batch wxyz pose tensors into caster-owned pose state.
+
+    ``pos_w`` and ``quat_w`` have the exact public ``(env, body, component)``
+    layout. The quaternion conversion is deliberately performed by this
+    device kernel; reinterpreting the public float32 tensor as ``wp.quat``
+    would swap its wxyz components for Warp's xyzw representation.
+    """
+    env_id, body_id = wp.tid()
+    body_xpos[env_id, body_id] = wp.vec3(
+        pos_w[env_id, body_id, 0],
+        pos_w[env_id, body_id, 1],
+        pos_w[env_id, body_id, 2],
+    )
+    body_xquat[env_id, body_id] = wp.quat(
+        quat_w[env_id, body_id, 1],
+        quat_w[env_id, body_id, 2],
+        quat_w[env_id, body_id, 3],
+        quat_w[env_id, body_id, 0],
+    )
+
+
+@wp.kernel
+def write_env_map_and_validate_ids_kernel(
+    env_ids: wp.array(dtype=wp.int64),
+    num_envs: int,
+    seen: wp.array(dtype=wp.int32),
+    env_map: wp.array(dtype=wp.int32),
+    validation_error: wp.array(dtype=wp.int32),
+):
+    """Convert, range-check, and de-duplicate a public environment selection.
+
+    ``seen`` is a bounded caster-owned scratch mask. It is zeroed by a preceding
+    launch, so duplicate detection remains device-side and never needs host
+    readback on the hot path.
+    """
+    row = wp.tid()
+    env_id = env_ids[row]
+    if env_id < 0 or env_id >= num_envs:
+        validation_error[0] = 1
+        return
+    if wp.atomic_add(seen, int(env_id), 1) != 0:
+        validation_error[0] = 1
+        return
+    env_map[row] = int(env_id)
+
+
+@wp.kernel
+def zero_int32_kernel(values: wp.array(dtype=wp.int32)):
+    """Zero one integer buffer on the caller's current stream."""
+    index = wp.tid()
+    values[index] = 0
+
+
+@wp.kernel
+def fill_ray_pattern_kernel(
+    ray_origins: wp.array2d(dtype=wp.vec3),
+    ray_directions: wp.array2d(dtype=wp.vec3),
+    shared_origins: wp.array(dtype=wp.vec3),
+    shared_directions: wp.array(dtype=wp.vec3),
+):
+    """Fan out the current shared Torch ray values into caster-owned staging."""
+    env_id, ray_id = wp.tid()
+    ray_origins[env_id, ray_id] = shared_origins[ray_id]
+    ray_directions[env_id, ray_id] = shared_directions[ray_id]
+
+
+@wp.kernel
+def fill_empty_trace_kernel(
+    distances: wp.array2d(dtype=wp.float32),
+    hits: wp.array2d(dtype=wp.bool),
+    hit_geoms: wp.array2d(dtype=wp.int32),
+    hit_points: wp.array3d(dtype=wp.float32),
+    body_ids: wp.array2d(dtype=wp.int32),
+    max_distance: float,
+    write_hit_point: int,
+    write_body_id: int,
+):
+    """Materialize the all-miss convention without a host readback."""
+    row, ray_id = wp.tid()
+    distances[row, ray_id] = max_distance
+    hits[row, ray_id] = False
+    hit_geoms[row, ray_id] = -1
+    if write_hit_point == 1:
+        hit_points[row, ray_id, 0] = 0.0
+        hit_points[row, ray_id, 1] = 0.0
+        hit_points[row, ray_id, 2] = 0.0
+    if write_body_id == 1:
+        body_ids[row, ray_id] = -1
+
+
+@wp.kernel
+def write_tensor_trace_outputs_kernel(
+    ray_origins: wp.array2d(dtype=wp.vec3),
+    ray_directions: wp.array2d(dtype=wp.vec3),
+    distances: wp.array2d(dtype=wp.float32),
+    hits: wp.array2d(dtype=wp.bool),
+    hit_geoms: wp.array2d(dtype=wp.int32),
+    geom_body_ids: wp.array(dtype=wp.int32),
+    hit_points: wp.array3d(dtype=wp.float32),
+    body_ids: wp.array2d(dtype=wp.int32),
+    write_hit_point: int,
+    write_body_id: int,
+):
+    """Compute optional tensor outputs on the trace stream."""
+    row, ray_id = wp.tid()
+    geom_id = hit_geoms[row, ray_id]
+    hit = hits[row, ray_id]
+    if write_hit_point == 1:
+        distance = distances[row, ray_id]
+        origin = ray_origins[row, ray_id]
+        direction = ray_directions[row, ray_id]
+        hit_points[row, ray_id, 0] = origin[0] + distance * direction[0]
+        hit_points[row, ray_id, 1] = origin[1] + distance * direction[1]
+        hit_points[row, ray_id, 2] = origin[2] + distance * direction[2]
+    if write_body_id == 1:
+        body_ids[row, ray_id] = geom_body_ids[geom_id] if hit else -1
+
+
+@wp.kernel
 def compute_geom_poses_kernel(
     env_map: wp.array(dtype=wp.int32),
     geom_body_ids: wp.array(dtype=wp.int32),
