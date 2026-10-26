@@ -6,7 +6,7 @@ build-backend = "uv_build"
 module-name = "uni_ray"
 
 [project]
-name = "uni-ray"
+name = "uniray"
 version = "0.1.0"
 description = "Warp-accelerated ray caster plugin for the UniSim ray-query contract"
 readme = "README.md"

@@ -1,0 +1,172 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-dists:
+    name: Build and verify release distributions
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: uni_ray
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          path: uni_ray
+      - name: Check out the pinned UniSim contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: unilabsim/unisim
+          ref: v2.2.0
+          path: unisim
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: false
+      - name: Verify tag matches project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          project_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          test "$tag_version" = "$project_version" || {
+            echo "Tag v$tag_version does not match pyproject.toml version $project_version" >&2
+            exit 1
+          }
+      - name: Verify CI passed for tagged commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          successful_runs="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')"
+          test "$successful_runs" -gt 0 || {
+            echo "No successful ci.yml run found for tagged commit $GITHUB_SHA" >&2
+            echo "Wait for CI to pass before creating the release tag." >&2
+            exit 1
+          }
+      - name: Build source distribution and universal wheel
+        run: uv build --sdist --wheel --out-dir dist
+      - name: Verify the wheel is a pure-Python universal wheel
+        shell: bash
+        run: |
+          wheel="$(ls dist/*.whl)"
+          case "$(basename "$wheel")" in
+            uniray-*-py3-none-any.whl) ;;
+            *) echo "Expected a py3-none-any wheel, got: $wheel" >&2; exit 1 ;;
+          esac
+          python3 - "$wheel" <<'EOF'
+          import re
+          import sys
+          import zipfile
+
+          wheel = sys.argv[1]
+          names = zipfile.ZipFile(wheel).namelist()
+          banned_suffix = re.compile(r"\.(so|pyd|dylib|dll)$")
+          banned = [name for name in names if banned_suffix.search(name)]
+          banned += [name for name in names if name.startswith(("tests/", ".github/"))]
+          assert not banned, f"wheel contains non-runtime content: {banned}"
+          metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))
+          text = zipfile.ZipFile(wheel).read(metadata).decode()
+          assert re.search(r"^Requires-Python: >=3\.10, ?<3\.14$", text, re.M), text
+          requires = [
+              line
+              for line in text.splitlines()
+              if line.startswith("Requires-Dist:") and "extra ==" not in line
+          ]
+          expected = [
+              "Requires-Dist: numpy",
+              "Requires-Dist: unisim-core>=2.2.0",
+          ]
+          assert requires == expected, (requires, expected)
+          EOF
+      - name: Check distribution metadata
+        run: uvx --from twine twine check dist/*
+      - name: Install runtime dependencies
+        run: |
+          uv venv .release-venv
+          uv pip install --python .release-venv/bin/python \
+            numpy 'unisim-core==2.2.0' 'warp-lang>=1.11.0'
+      - name: Install the freshly built source distribution
+        run: >-
+          uv pip install --python .release-venv/bin/python --reinstall --no-deps
+          --no-binary uniray --no-cache --find-links dist --no-index uniray
+      - name: Smoke test installed source distribution
+        run: .release-venv/bin/python scripts/release_smoke.py
+      - name: Install the freshly built wheel only
+        run: >-
+          uv pip install --python .release-venv/bin/python --reinstall --no-deps
+          --only-binary :all: --no-cache --find-links dist --no-index uniray
+      - name: Smoke test installed wheel
+        run: .release-venv/bin/python scripts/release_smoke.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-dists
+          path: |
+            uni_ray/dist/*.tar.gz
+            uni_ray/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    needs: build-dists
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-dists
+          path: dist
+      - name: Publish source distribution and wheel to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: uni_ray
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          path: uni_ray
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-dists
+          path: uni_ray/dist
+      - name: Extract changelog notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" \
+            '$0 ~ "^## " ver " " {flag=1; next} /^## / && flag {exit} flag' \
+            CHANGELOG.md > release-notes.md
+          test -s release-notes.md || echo "See CHANGELOG.md for details." > release-notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.whl
+          --title "uniray ${GITHUB_REF_NAME#v}"
+          --notes-file release-notes.md
