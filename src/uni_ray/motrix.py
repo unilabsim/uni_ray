@@ -5,7 +5,7 @@ sizes, local poses, link ownership, and hfield height data out of a loaded
 ``motrixsim.SceneModel`` (e.g. from ``motrixsim.load_model`` or
 ``load_mjcf_str``), converts them to plain NumPy on the cold path, and feeds
 the shared, profile-neutral descriptor build in ``uni_ray.mjbatch``. The
-result is the same immutable :class:`MjBatchCollision` — the caster, the
+result is the same immutable :class:`RayCollisionDescription` — the caster, the
 pose-sync contract, and the hot path are identical for all profiles. No
 ``motrixsim`` API is touched after descriptor construction; in particular
 nothing Motrix-side runs on the ``update_pose``/``trace`` hot path.
@@ -45,8 +45,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from unisim.errors import UnsupportedCapabilityError
 from unisim.optional import OptionalDependencyError
+from unisim.ray_query import RayCollisionDescription
 
-from .mjbatch import MjBatchCollision, _build_collision_description, _ModelSceneData
+from .mjbatch import _build_collision_description, _ModelSceneData
 
 if TYPE_CHECKING:
     from unisim.ray_query import RayCaster
@@ -92,7 +93,7 @@ def _shape_name(geom: Any) -> str:
     return getattr(shape, "name", None) or str(shape).split(".")[-1]
 
 
-def build_collision_description(scene_model: Any) -> MjBatchCollision:
+def build_collision_description(scene_model: Any) -> RayCollisionDescription:
     """Read a ``motrixsim.SceneModel`` once and freeze it into a descriptor.
 
     Plane sizes are zeroed (contract infinite-plane semantics) and hfields
@@ -125,9 +126,7 @@ def _scene_data_from_motrix(scene_model: Any) -> _ModelSceneData:
         name = _shape_name(geom)
         if name in _MOTRIX_UNSUPPORTED_SHAPES:
             label = geom.name or f"#{geom.index}"
-            unsupported.append(
-                f"geom {label} ({name}): {_MOTRIX_UNSUPPORTED_SHAPES[name]}"
-            )
+            unsupported.append(f"geom {label} ({name}): {_MOTRIX_UNSUPPORTED_SHAPES[name]}")
             continue
         code = _MOTRIX_SHAPE_TO_MJ_CODE.get(name)
         if code is None:
@@ -182,9 +181,7 @@ def _scene_data_from_motrix(scene_model: Any) -> _ModelSceneData:
             0.0,  # no finite base box in the MotrixSim solid
         ]
         hfield_data_parts.append(heights.reshape(-1))
-    hfield_data = (
-        np.concatenate(hfield_data_parts) if hfield_data_parts else np.zeros(0)
-    )
+    hfield_data = np.concatenate(hfield_data_parts) if hfield_data_parts else np.zeros(0)
 
     return _ModelSceneData(
         num_bodies=int(scene_model.num_links) + 1,
@@ -233,7 +230,7 @@ def create_ray_caster(
     return caster
 
 
-def rebuild_caster_from_motrix(caster: Any, scene_model: Any) -> MjBatchCollision:
+def rebuild_caster_from_motrix(caster: Any, scene_model: Any) -> RayCollisionDescription:
     """Re-read an updated ``motrixsim.SceneModel`` and rebuild ``caster``'s scene.
 
     The MotrixSim-profile counterpart of

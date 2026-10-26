@@ -6,10 +6,12 @@ shape ``(num_envs, num_rays)`` and the materialized scene; ``update_pose`` and
 fixed-shape kernels, so the hot path performs no unbounded allocation, no XML
 parsing, no name resolution, and no ``mujoco.MjData`` access.
 
-Results are returned through an explicit host readback. ``distance``, ``hit``,
-and ``geom_id`` are views into caster-owned host buffers that the next
-``trace`` call reuses (callers retaining results across calls must copy them);
-``hit_point`` and ``body_id`` are computed fresh on the host per call.
+The host profile returns results through an explicit readback into persistent
+buffers. The tensor profile returns persistent caster-owned Torch views on the
+caller's device and stream. Both profiles support static geom/body/tag filters,
+an inclusive ``min_distance``, and optional world-space against-ray normals.
+The public ``RayCollisionDescription`` companion supplies mesh topology and
+public identities.
 
 The contract requires a second ``materialize`` to fail, so scene replacement
 (runtime geometry randomization, mesh/hfield replacement) goes through the
@@ -31,9 +33,11 @@ from unisim.errors import BackendError, UnsupportedCapabilityError
 from unisim.ray_query import (
     RayCaster,
     RayCasterCapabilities,
+    RayCollisionDescription,
     RayGeomType,
     RayPoseTensorView,
     RaySceneDescription,
+    RayTraceFilter,
     RayTraceOutputs,
     RayTraceResult,
     RayTraceTensorResult,
@@ -51,7 +55,6 @@ from .kernels import (
     write_tensor_trace_outputs_kernel,
     zero_int32_kernel,
 )
-from .mjbatch import MjBatchCollision
 
 # Kernel dispatch codes follow the MuJoCo mjtGeom numbering used by the copied
 # MuJoCo-LiDAR kernels (0=plane, 2=sphere, 3=capsule, 4=ellipsoid, 5=cylinder,
@@ -77,6 +80,7 @@ _POSITIVE_SIZE_DIMS = {
 # Warp quaternions are stored (x, y, z, w); the contract uses wxyz.
 _WXYZ_TO_XYZW = (1, 2, 3, 0)
 _LITTLE_ENDIAN = sys.byteorder == "little"
+_TensorResultKey = tuple[int, bool, bool, bool, bool]
 
 
 def _default_device() -> str:
@@ -149,9 +153,12 @@ class WarpRayCaster(RayCaster):
         torch_devices=("cpu", "cuda"),
         stream_event_ownership="caller",
         supports_hit_point=True,
-        supports_normal=False,
+        supports_host_normal=True,
+        supports_tensor_normal=True,
         supports_geom_id=True,
         supports_body_id=True,
+        supports_static_filter=True,
+        supports_min_distance=True,
     )
 
     def __init__(
@@ -159,7 +166,7 @@ class WarpRayCaster(RayCaster):
         num_envs: int = 1,
         num_rays: int = 1,
         *,
-        collision: MjBatchCollision | None = None,
+        collision: RayCollisionDescription | None = None,
         device: str | Any | None = None,
     ) -> None:
         for name, value in (("num_envs", num_envs), ("num_rays", num_rays)):
@@ -167,6 +174,8 @@ class WarpRayCaster(RayCaster):
                 raise TypeError(f"{name} must be an integer")
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+        if collision is not None and not isinstance(collision, RayCollisionDescription):
+            raise TypeError("collision must be a RayCollisionDescription or None")
         self._num_envs = num_envs
         self._num_rays = num_rays
         self._collision = collision
@@ -175,6 +184,8 @@ class WarpRayCaster(RayCaster):
 
         self._scene: RaySceneDescription | None = None
         self._closed = False
+        self._filter_masks: dict[RayTraceFilter, wp.array] = {}
+        self._all_geoms_allowed: wp.array | None = None
         self._tensor_layout: tuple[str, ...] | None = None
         self._tensor_pose_device: str | None = None
         self._tensor_pos: Any | None = None
@@ -185,7 +196,7 @@ class WarpRayCaster(RayCaster):
         self._tensor_static_pattern: tuple[Any, Any] | None = None
         self._tensor_static_origins: wp.array | None = None
         self._tensor_static_directions: wp.array | None = None
-        self._tensor_results: dict[tuple[int, bool, bool, bool], RayTraceTensorResult] = {}
+        self._tensor_results: dict[_TensorResultKey, RayTraceTensorResult] = {}
         # Minimal outputs always use a caster-owned geom-id scratch tensor; optional
         # profiles own their returned geom_id views.
         self._tensor_hit_geoms: Any | None = None
@@ -223,6 +234,11 @@ class WarpRayCaster(RayCaster):
         self._distances_host = np.zeros((num_envs, num_rays), dtype=np.float32)
         self._hits_host = np.zeros((num_envs, num_rays), dtype=np.bool_)
         self._hit_geoms_host = np.zeros((num_envs, num_rays), dtype=np.int32)
+        self._normals_dev = wp.zeros((num_envs, num_rays, 3), dtype=wp.float32, device=self._device)
+        self._normals_host = np.zeros((num_envs, num_rays, 3), dtype=np.float32)
+        self._normals_host_wp = wp.array(
+            self._normals_host, dtype=wp.float32, device="cpu", copy=False
+        )
         self._distances_host_wp = wp.array(
             self._distances_host, dtype=wp.float32, device="cpu", copy=False
         )
@@ -275,11 +291,15 @@ class WarpRayCaster(RayCaster):
             )
         if not isinstance(scene, RaySceneDescription):
             raise TypeError("scene must be a RaySceneDescription")
+        if self._collision is not None and self._collision.scene is not scene:
+            raise ValueError(
+                "collision descriptor does not match the bound scene; materialize collision.scene"
+            )
         self._bind_scene(scene, self._collision)
 
     def rebuild(
         self,
-        collision: MjBatchCollision | None = None,
+        collision: RayCollisionDescription | None = None,
         *,
         scene: RaySceneDescription | None = None,
     ) -> None:
@@ -308,8 +328,8 @@ class WarpRayCaster(RayCaster):
         if (collision is None) == (scene is None):
             raise ValueError("rebuild takes exactly one of collision= or scene=")
         if collision is not None:
-            if not isinstance(collision, MjBatchCollision):
-                raise TypeError("collision must be an MjBatchCollision")
+            if not isinstance(collision, RayCollisionDescription):
+                raise TypeError("collision must be a RayCollisionDescription")
             self._collision = collision
             self._bind_scene(collision.scene, collision)
         else:
@@ -318,12 +338,14 @@ class WarpRayCaster(RayCaster):
                 raise TypeError("scene must be a RaySceneDescription")
             self._bind_scene(scene, self._collision)
 
-    def _bind_scene(self, scene: RaySceneDescription, collision: MjBatchCollision | None) -> None:
+    def _bind_scene(
+        self, scene: RaySceneDescription, collision: RayCollisionDescription | None
+    ) -> None:
         """(Re)allocate all scene-dependent state; cold path only."""
         if RayGeomType.MESH in scene.geom_types and collision is None:
             raise UnsupportedCapabilityError(
-                "uni_ray mesh support requires a collision descriptor built by "
-                "uni_ray.mjbatch.build_collision_description and passed as "
+                "uni_ray mesh support requires a public RayCollisionDescription "
+                "passed as "
                 "create_ray_caster(..., collision=...) or rebuild(collision=...)"
             )
         if collision is not None:
@@ -336,6 +358,18 @@ class WarpRayCaster(RayCaster):
                     "collision.scene of the descriptor the caster was created or "
                     "rebuilt with"
                 )
+            if (
+                collision.scene.geom_types != scene.geom_types
+                or collision.scene.body_names != scene.body_names
+                or not np.array_equal(collision.scene.geom_body_ids, scene.geom_body_ids)
+            ):
+                raise ValueError(
+                    "scene rebuild may change only geom sizes/local poses; geom types, "
+                    "body mapping, body names, and mesh mapping must match the collision"
+                )
+        else:
+            collision = RayCollisionDescription(scene=scene)
+        self._collision = collision
         for geom_type, size in zip(scene.geom_types, scene.geom_sizes):
             required = _POSITIVE_SIZE_DIMS.get(geom_type, ())
             if any(float(size[dim]) <= 0.0 for dim in required):
@@ -348,6 +382,10 @@ class WarpRayCaster(RayCaster):
         self._scene = scene
         self._num_bodies = scene.num_bodies
         self._num_geoms = num_geoms
+        self._filter_masks.clear()
+        self._all_geoms_allowed = wp.array(
+            np.ones(num_geoms, dtype=np.int32), dtype=wp.int32, device=self._device
+        )
         self._tensor_layout = None
         self._tensor_pose_device = None
         self._tensor_pos = None
@@ -563,13 +601,18 @@ class WarpRayCaster(RayCaster):
         max_distance: float,
         env_ids: Sequence[int] | np.ndarray | None = None,
         outputs: RayTraceOutputs | None = None,
+        *,
+        min_distance: float = 0.0,
+        ray_filter: RayTraceFilter | None = None,
     ) -> RayTraceResult:
         self._require_open()
         scene = self._require_materialized()
         request = self._check_trace_outputs(outputs)
         rows = self._resolve_selected_rows(env_ids)
         limit = self._resolve_max_distance(max_distance)
+        minimum = self._check_trace_query(max_distance, min_distance, ray_filter)
         origins, directions = self._resolve_ray_batch(ray_origins, ray_directions, rows.size)
+        geom_filter = self._geom_filter_array(ray_filter)
 
         count = rows.size
         if count and self._num_geoms:
@@ -589,40 +632,55 @@ class WarpRayCaster(RayCaster):
                     self._mesh_ids_dev,
                     self._geom_xpos_dev,
                     self._geom_xmat_dev,
+                    geom_filter,
                     self._env_map_for(rows),
                     self._ray_origins_dev,
                     self._ray_directions_dev,
                     float(limit),
+                    float(minimum),
                     self._distances_dev,
                     self._hits_dev,
                     self._hit_geoms_dev,
+                    self._normals_dev,
+                    int(request.normal),
                 ],
                 device=self._device,
             )
             wp.copy(self._distances_host_wp, self._distances_dev)
             wp.copy(self._hits_host_wp, self._hits_dev)
             wp.copy(self._hit_geoms_host_wp, self._hit_geoms_dev)
+            if request.normal:
+                wp.copy(self._normals_host_wp, self._normals_dev)
             wp.synchronize_device(self._device)
             distance = self._distances_host[:count]
             hit = self._hits_host[:count]
             geom_id = self._hit_geoms_host[:count]
+            normal = self._normals_host[:count].copy() if request.normal else None
         else:
             distance = np.full((count, self._num_rays), limit, dtype=np.float32)
             hit = np.zeros((count, self._num_rays), dtype=np.bool_)
             geom_id = np.full((count, self._num_rays), -1, dtype=np.int32)
+            if request.normal:
+                normal = np.zeros((count, self._num_rays, 3), dtype=np.float32)
+            else:
+                normal = None
 
         hit_point = None
         body_id = None
         if request.hit_point:
             hit_point = origins + distance.astype(np.float64)[..., None] * directions
         if request.body_id:
-            body_id = np.where(hit, scene.geom_body_ids[np.maximum(geom_id, 0)], -1)
+            if scene.num_geoms:
+                body_id = np.where(hit, scene.geom_body_ids[np.maximum(geom_id, 0)], -1)
+            else:
+                body_id = np.full((count, self._num_rays), -1, dtype=np.int32)
         return RayTraceResult(
             distance=distance,
             hit=hit,
             hit_point=hit_point,
             geom_id=geom_id if request.geom_id else None,
             body_id=body_id,
+            normal=normal,
         )
 
     def trace_tensor(
@@ -632,6 +690,9 @@ class WarpRayCaster(RayCaster):
         max_distance: float,
         env_ids: Any | None = None,
         outputs: RayTraceOutputs | None = None,
+        *,
+        min_distance: float = 0.0,
+        ray_filter: RayTraceFilter | None = None,
     ) -> RayTraceTensorResult:
         """Launch a Torch-native query on the caller's current stream."""
         import torch
@@ -639,9 +700,8 @@ class WarpRayCaster(RayCaster):
         self._require_open()
         self._require_materialized()
         self._require_tensor_layout()
-        request = self._check_trace_outputs(outputs)
-        if request.normal:
-            raise UnsupportedCapabilityError("uni_ray tensor path does not support normals")
+        request = self._check_trace_outputs(outputs, tensor=True)
+        minimum = self._check_trace_query(max_distance, min_distance, ray_filter)
         limit = self._resolve_max_distance(max_distance)
         device = self._required_tensor_device()
         rows = self._resolve_tensor_rows(env_ids, torch, device)
@@ -649,10 +709,16 @@ class WarpRayCaster(RayCaster):
             ray_origins, ray_directions, torch, device, rows.shape[0]
         )
         result = self._tensor_result(
-            torch, device, rows.shape[0], request.hit_point, request.geom_id, request.body_id
+            torch,
+            device,
+            rows.shape[0],
+            request.hit_point,
+            request.normal,
+            request.geom_id,
+            request.body_id,
         )
-
         with _torch_caller_stream_scope(torch, device, self._device_obj):
+            geom_filter = self._geom_filter_array(ray_filter)
             origins_wp = wp.from_torch(origins, dtype=wp.vec3)
             directions_wp = wp.from_torch(directions, dtype=wp.vec3)
             rows_wp = _torch_int64_view(rows)
@@ -663,14 +729,9 @@ class WarpRayCaster(RayCaster):
                     self._tensor_hit_geoms = torch.empty(
                         (self._num_envs, self._num_rays), dtype=torch.int32, device=device
                     )
-                result = RayTraceTensorResult(
-                    distance=result.distance,
-                    hit=result.hit,
-                    hit_point=result.hit_point,
-                    geom_id=self._tensor_hit_geoms,
-                    body_id=result.body_id,
-                )
-            hit_geoms_tensor = self._tensor_hit_geoms if result.geom_id is None else result.geom_id
+                hit_geoms_tensor = self._tensor_hit_geoms[: rows.shape[0]]
+            else:
+                hit_geoms_tensor = result.geom_id
             hit_geoms_wp = wp.from_torch(hit_geoms_tensor, dtype=wp.int32)
             hit_points_wp = (
                 wp.from_torch(result.hit_point, dtype=wp.float32)
@@ -681,6 +742,11 @@ class WarpRayCaster(RayCaster):
                 wp.from_torch(result.body_id, dtype=wp.int32)
                 if result.body_id is not None
                 else self._empty2d_int32
+            )
+            normals_wp = (
+                wp.from_torch(result.normal, dtype=wp.float32)
+                if result.normal is not None
+                else self._empty3d_float32
             )
 
             if rows.shape[0]:
@@ -742,9 +808,11 @@ class WarpRayCaster(RayCaster):
                         hits_wp,
                         hit_geoms_wp,
                         hit_points_wp,
+                        normals_wp,
                         body_ids_wp,
                         float(limit),
                         int(result.hit_point is not None),
+                        int(result.normal is not None),
                         int(result.body_id is not None),
                     ],
                     device=self._device,
@@ -762,13 +830,17 @@ class WarpRayCaster(RayCaster):
                         self._mesh_ids_dev,
                         self._geom_xpos_dev,
                         self._geom_xmat_dev,
+                        geom_filter,
                         self._env_map_dev,
                         origins_wp,
                         directions_wp,
                         float(limit),
+                        float(minimum),
                         distances_wp,
                         hits_wp,
                         hit_geoms_wp,
+                        normals_wp,
+                        int(request.normal),
                     ],
                     device=self._device,
                 )
@@ -811,6 +883,8 @@ class WarpRayCaster(RayCaster):
         self._closed = True
         self._meshes = []
         self._bvh = None
+        self._filter_masks.clear()
+        self._all_geoms_allowed = None
         self._tensor_layout = None
         self._tensor_pose_device = None
         self._tensor_pos = None
@@ -1036,10 +1110,11 @@ class WarpRayCaster(RayCaster):
         device: str,
         rows: int,
         hit_point: bool,
+        normal: bool,
         geom_id: bool,
         body_id: bool,
     ) -> RayTraceTensorResult:
-        key = (rows, hit_point, geom_id, body_id)
+        key: _TensorResultKey = (int(rows), hit_point, normal, geom_id, body_id)
         result = self._tensor_results.get(key)
         if result is None:
             distance = torch.empty((rows, self._num_rays), dtype=torch.float32, device=device)
@@ -1050,6 +1125,11 @@ class WarpRayCaster(RayCaster):
                 hit_point=(
                     torch.empty((*distance.shape, 3), dtype=torch.float32, device=device)
                     if hit_point
+                    else None
+                ),
+                normal=(
+                    torch.empty((*distance.shape, 3), dtype=torch.float32, device=device)
+                    if normal
                     else None
                 ),
                 geom_id=(
@@ -1090,7 +1170,7 @@ class WarpRayCaster(RayCaster):
 
     @staticmethod
     def _local_aabbs(
-        scene: RaySceneDescription, collision: MjBatchCollision | None
+        scene: RaySceneDescription, collision: RayCollisionDescription | None
     ) -> tuple[np.ndarray, np.ndarray]:
         """Local-frame AABB center/half extents per geom for the broad phase."""
         center = np.zeros((scene.num_geoms, 3), dtype=np.float32)
@@ -1124,6 +1204,21 @@ class WarpRayCaster(RayCaster):
         if self._scene is None:
             raise BackendError("uni_ray caster must be materialized before querying")
         return self._scene
+
+    def _geom_filter_array(self, ray_filter: RayTraceFilter | None) -> wp.array:
+        """Return a persistent device mask for one immutable static filter."""
+
+        if ray_filter is None or not ray_filter.has_constraints():
+            assert self._all_geoms_allowed is not None
+            return self._all_geoms_allowed
+        cached = self._filter_masks.get(ray_filter)
+        if cached is not None:
+            return cached
+        assert self._collision is not None
+        mask = ray_filter.geom_mask(self._collision).astype(np.int32)
+        result = wp.array(mask, dtype=wp.int32, device=self._device)
+        self._filter_masks[ray_filter] = result
+        return result
 
 
 __all__ = ["WarpRayCaster"]

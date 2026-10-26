@@ -52,7 +52,7 @@ dev = [
     "torch",
     "warp-lang>=1.11.0",
     "mujoco>=3.2.0",
-    "mujoco-warp",
+    "mujoco-warp~=3.11.0",
     "viser",
 ]
 

@@ -85,6 +85,51 @@ def _mj_ray_all(
     return distances, geom_ids
 
 
+def _mj_ray_all_with_normals(
+    model, data, origins: np.ndarray, directions: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    distances, geom_ids = _mj_ray_all(model, data, origins, directions)
+    normals = _native_normals_for_hits(model, data, origins, directions, distances, geom_ids)
+    return distances, geom_ids, normals
+
+
+def _native_normals_for_hits(
+    model,
+    data,
+    origins: np.ndarray,
+    directions: np.ndarray,
+    distances: np.ndarray,
+    geom_ids: np.ndarray,
+) -> np.ndarray:
+    normals = np.zeros((origins.shape[0], 3), dtype=np.float64)
+    for index, geom_id in enumerate(geom_ids):
+        if geom_id < 0:
+            continue
+        geom_id = int(geom_id)
+        normal = np.zeros(3, dtype=np.float64)
+        distance = mujoco.mju_rayGeom(
+            data.geom_xpos[geom_id],
+            data.geom_xmat[geom_id],
+            model.geom_size[geom_id],
+            origins[index],
+            directions[index],
+            model.geom_type[geom_id],
+            normal,
+        )
+        if distance >= 0.0 and abs(distance - distances[index]) <= ATOL:
+            normals[index] = normal
+        elif int(model.geom_type[geom_id]) == 0:
+            world_normal = data.geom_xmat[geom_id].reshape(3, 3)[:, 2]
+            normals[index] = (
+                -world_normal if np.dot(world_normal, directions[index]) > 0 else world_normal
+            )
+        else:
+            raise AssertionError("native primitive normal reference diverged from mj_ray")
+        if np.dot(normals[index], directions[index]) > 0.0:
+            normals[index] = -normals[index]
+    return normals
+
+
 def _cpu_reference(
     model,
     data,
@@ -151,14 +196,22 @@ def test_primitive_sweep_matches_mj_ray_over_random_poses() -> None:
                 cpu_distances, cpu_geom_ids = _cpu_reference(
                     model, data, origins, directions, max_distance=10.0, plane_geom_ids=(0,)
                 )
+                cpu_normals = _native_normals_for_hits(
+                    model, data, origins, directions, cpu_distances, cpu_geom_ids
+                )
                 result = caster.trace(
                     origins,
                     directions,
                     max_distance=10.0,
                     env_ids=[env_id],
-                    outputs=RayTraceOutputs(geom_id=True),
+                    outputs=RayTraceOutputs(geom_id=True, normal=True),
                 )
                 _assert_matches_cpu(result, cpu_distances[None], cpu_geom_ids[None], 10.0)
+                cpu_hit = cpu_distances >= 0.0
+                normal_match = cpu_hit & (result.geom_id[0] == cpu_geom_ids)
+                np.testing.assert_allclose(
+                    result.normal[0][normal_match], cpu_normals[normal_match], atol=1e-3
+                )
     finally:
         caster.close()
 
@@ -179,10 +232,20 @@ def test_capsule_cylinder_rotated_axis_matches_cpu_2000_rays() -> None:
             (np.cos(phi) * np.cos(theta), np.cos(phi) * np.sin(theta), np.sin(phi)), axis=-1
         )
         origins = np.zeros((2000, 3))
-        cpu_distances, cpu_geom_ids = _mj_ray_all(model, data, origins, directions)
+        cpu_distances, cpu_geom_ids, cpu_normals = _mj_ray_all_with_normals(
+            model, data, origins, directions
+        )
         result = caster.trace(
-            origins, directions, max_distance=100.0, outputs=RayTraceOutputs(geom_id=True)
+            origins,
+            directions,
+            max_distance=100.0,
+            outputs=RayTraceOutputs(geom_id=True, normal=True),
         )
         _assert_matches_cpu(result, cpu_distances[None], cpu_geom_ids[None], 100.0)
+        cpu_hit = cpu_distances >= 0.0
+        normal_match = cpu_hit & (result.geom_id[0] == cpu_geom_ids)
+        np.testing.assert_allclose(
+            result.normal[0][normal_match], cpu_normals[normal_match], atol=1e-3
+        )
     finally:
         caster.close()

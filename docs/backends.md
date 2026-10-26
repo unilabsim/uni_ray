@@ -1,8 +1,10 @@
 # Backend profiles: mjbatch, mjwarp, and motrix (#300, #301)
 
-uni_ray ships three cold-path profiles that produce the **same** immutable
-collision descriptor (`MjBatchCollision`) and bind the **same** caster,
-pose-sync contract, and kernels:
+uni_ray ships three cold-path profiles that produce equivalent immutable
+collision descriptors and bind the **same** caster, pose-sync contract, and
+kernels. Portable callers should consume UniSim's public
+`RayCollisionDescription`; the profile builders below remain engine-specific
+conveniences for direct model access:
 
 | Profile | Builder | Input |
 |---|---|---|
@@ -17,6 +19,11 @@ zeroing, mesh dedup, and hfield triangulation behave identically. Each
 profile's runtime import (`mujoco` / `mujoco_warp` / `motrixsim`) is lazy and
 confined to its module; no engine types appear in the returned objects
 (plain NumPy descriptor, plain `unisim.ray_query.RayCaster`).
+All profile builders return a public geometry-only `RayCollisionDescription`.
+They are conveniences for direct engine-model access and omit adapter-emitted
+semantic tags and body ancestry. Use the backend's
+`get_ray_collision_description()` when a rich query needs those public
+identities.
 
 ## mjwarp profile usage
 
@@ -158,7 +165,7 @@ limit (motrixsim-core 0.10.1, probed on RTX 4090 / Linux x86_64):
 | Profile: pose-sync | **implemented** | Host NumPy body pos/quat through `update_pose`, shared caster; link-pose mapping above is test-pinned |
 | Profile: static-map | covered by pose-sync | A materialized caster without `update_pose` traces the identity-pose static scene |
 | Profile: native | **unsupported** | No general batch raycast API in motrixsim-core 0.10.1 (`TerrainScanner` is terrain-only) |
-| Outputs | as uni_ray core | distance/hit/geom_id/body_id/hit_point exact; normals and device output unsupported (fail closed), same as every profile |
+| Outputs | as uni_ray core | distance/hit/geom_id/body_id/hit_point and optional normals are exact; rich filters and `min_distance` follow the shared core contract |
 
 ### MuJoCo-vs-MotrixSim semantic differences found
 

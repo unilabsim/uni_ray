@@ -183,9 +183,7 @@ def test_hfield_trace_matches_compiled_heights() -> None:
     directions = np.tile([[0.0, 0.0, -1.0]], (len(points), 1))
     expected = np.array([2.0 - h for _, _, h in points])
 
-    caster = uni_ray.create_ray_caster(
-        num_envs=1, num_rays=len(points), collision=collision
-    )
+    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=len(points), collision=collision)
     caster.materialize(collision.scene)
     result = caster.trace(origins, directions, max_distance=10.0)
     assert np.array(result.hit)[0].all()
@@ -268,9 +266,7 @@ def test_device_output_and_dynamic_geometry_fail_closed() -> None:
     assert caster.get_ray_capabilities().supports_device_output
     caster.close()
     with pytest.raises(TypeError, match="device_output"):
-        uni_ray.create_ray_caster(
-            num_envs=1, num_rays=1, collision=collision, device_output=True
-        )
+        uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision, device_output=True)
 
     # Dynamic geometry outside the explicit cold-path rebuild has no API:
     # re-materializing a bound caster (geometry change without rebuild) fails.

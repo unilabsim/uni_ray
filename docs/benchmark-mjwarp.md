@@ -76,9 +76,10 @@ distance error < 1e-3 on agreed hits):
 2. **Miss sentinel / cutoff**: mujoco-warp reports misses as `dist = -1`,
    `geom_id = -1` and has no `max_distance` cutoff; the comparison clips
    mujoco-warp hits at the contract's `max_distance` (10.0).
-3. **Normals**: the `mjw.rays` kernel always computes hit normals; uni_ray
-   does not compute normals at all. This inflates the mujoco-warp kernel
-   time slightly (conservative for the ratios below).
+3. **Normals**: the `mjw.rays` kernel always computes hit normals, while this
+   #300 comparison does not request uni_ray's optional normal output. This
+   inflates the mujoco-warp kernel time slightly (conservative for the ratios
+   below).
 4. **Inside-origin** rays were not exercised by these ray distributions;
    uni_ray matches `mj_ray` exit-distance semantics there (see
    docs/conformance.md).
@@ -180,7 +181,8 @@ intersection kernel.
 
 ## Fairness caveats
 
-- mujoco-warp kernels compute hit normals; uni_ray does not.
+- mujoco-warp kernels compute hit normals; this comparison does not request
+  uni_ray's optional normal output.
 - mujoco-warp has no `max_distance` pruning inside its kernels; uni_ray
   prunes at 10.0.
 - uni_ray's timed `trace` returns distance+hit; mujoco-warp's timed readback

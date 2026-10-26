@@ -134,9 +134,7 @@ def test_matches_mujoco_mj_ray(model_and_data, caster) -> None:
                 assert result.geom_id[env_row, ray] == -1
             else:
                 assert result.hit[env_row, ray]
-                assert result.distance[env_row, ray] == pytest.approx(
-                    expected_dist[ray], abs=ATOL
-                )
+                assert result.distance[env_row, ray] == pytest.approx(expected_dist[ray], abs=ATOL)
                 assert result.geom_id[env_row, ray] == expected_geom[ray]
 
 

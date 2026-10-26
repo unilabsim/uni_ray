@@ -6,12 +6,15 @@
 #     per-ray theta/phi sensor pattern;
 #   * environment rows are selected through an env_map indirection instead of
 #     launching one thread block per physical env;
-#   * the trace kernel also reports the hit flag and nearest geom index and
-#     writes distance == max_distance on misses (the UniSim miss convention).
+#   * the trace kernel also reports the hit flag and nearest geom index,
+#     applies a static geom mask and inclusive minimum distance, optionally
+#     writes an against-ray normal, and writes distance == max_distance on
+#     misses (the UniSim miss convention).
 # compute_oriented_box_aabb, update_aabbs_batch_kernel, read_mat33_batch,
-# trace_geom, and ray_mesh_distance are otherwise verbatim, including the
+# and trace_geom are otherwise verbatim, including the
 # infinite-plane AABB substitution bugfix. write_body_poses_kernel and
-# compute_geom_poses_kernel are new (pose sync per mj_kinematics semantics).
+# compute_geom_poses_kernel are new (pose sync per mj_kinematics semantics);
+# ray_mesh_hit and trace_geom_normal are UniSim rich-query additions.
 # Copyright (c) 2025 Yufei Jia, MIT License. See NOTICE.
 import warp as wp
 
@@ -22,6 +25,7 @@ from .geometry import (
     ray_ellipsoid_distance,
     ray_plane_distance,
     ray_sphere_distance,
+    transform_ray_to_local,
 )
 
 
@@ -129,22 +133,87 @@ def trace_geom(
 
 
 @wp.func
-def ray_mesh_distance(
+def trace_geom_normal(
+    geom_type: int,
+    ray_origin: wp.vec3,
+    ray_dir: wp.vec3,
+    center: wp.vec3,
+    size: wp.vec3,
+    rot: wp.mat33,
+    hit_distance: float,
+):
+    ro, _rd = transform_ray_to_local(ray_origin, ray_dir, center, rot)
+    point = ro + hit_distance * _rd
+    local_normal = wp.vec3(0.0, 0.0, 1.0)
+    if geom_type == 2:
+        local_normal = point / size[0]
+    elif geom_type == 6:
+        axis = 0
+        best = -1.0
+        for candidate in range(3):
+            ratio = wp.abs(point[candidate]) / size[candidate]
+            if ratio > best:
+                best = ratio
+                axis = candidate
+        sign = wp.sign(point[axis])
+        if axis == 0:
+            local_normal = wp.vec3(sign, 0.0, 0.0)
+        elif axis == 1:
+            local_normal = wp.vec3(0.0, sign, 0.0)
+        else:
+            local_normal = wp.vec3(0.0, 0.0, sign)
+    elif geom_type == 5:
+        radius = wp.sqrt(point[0] * point[0] + point[1] * point[1])
+        side_error = wp.abs(radius - size[0])
+        cap_error = wp.abs(wp.abs(point[2]) - size[2])
+        if cap_error <= side_error:
+            local_normal = wp.vec3(0.0, 0.0, wp.sign(point[2]))
+        else:
+            local_normal = wp.vec3(point[0], point[1], 0.0) / size[0]
+    elif geom_type == 3:
+        if wp.abs(point[2]) < size[2]:
+            local_normal = wp.vec3(point[0], point[1], 0.0) / size[0]
+        else:
+            cap_center = wp.vec3(0.0, 0.0, size[2] * wp.sign(point[2]))
+            local_normal = (point - cap_center) / size[0]
+    elif geom_type == 4:
+        gradient = wp.vec3(
+            point[0] / (size[0] * size[0]),
+            point[1] / (size[1] * size[1]),
+            point[2] / (size[2] * size[2]),
+        )
+        length = wp.length(gradient)
+        if length > 1.0e-12:
+            local_normal = gradient / length
+    world_normal = rot * local_normal
+    if wp.dot(world_normal, ray_dir) > 0.0:
+        world_normal = -world_normal
+    return world_normal
+
+
+@wp.func
+def ray_mesh_hit(
     mesh_id: wp.uint64,
     ray_origin: wp.vec3,
     ray_dir: wp.vec3,
     center: wp.vec3,
     rot: wp.mat33,
-    max_t: float,
+    min_distance: float,
+    max_distance: float,
 ):
     rot_t = wp.transpose(rot)
     local_origin = rot_t * (ray_origin - center)
     local_dir = wp.normalize(rot_t * ray_dir)
-    query = wp.mesh_query_ray(mesh_id, local_origin, local_dir, max_t)
+    advanced_origin = local_origin + min_distance * local_dir
+    query = wp.mesh_query_ray(mesh_id, advanced_origin, local_dir, max_distance - min_distance)
     t = -1.0
+    normal = wp.vec3(0.0, 0.0, 0.0)
     if query.result:
-        t = query.t
-    return t
+        t = min_distance + query.t
+        normal = rot * query.normal
+        if wp.dot(normal, ray_dir) > 0.0:
+            normal = -normal
+    return t, normal
 
 
 @wp.kernel
@@ -241,9 +310,11 @@ def fill_empty_trace_kernel(
     hits: wp.array2d(dtype=wp.bool),
     hit_geoms: wp.array2d(dtype=wp.int32),
     hit_points: wp.array3d(dtype=wp.float32),
+    normals: wp.array3d(dtype=wp.float32),
     body_ids: wp.array2d(dtype=wp.int32),
     max_distance: float,
     write_hit_point: int,
+    write_normal: int,
     write_body_id: int,
 ):
     """Materialize the all-miss convention without a host readback."""
@@ -255,6 +326,10 @@ def fill_empty_trace_kernel(
         hit_points[row, ray_id, 0] = 0.0
         hit_points[row, ray_id, 1] = 0.0
         hit_points[row, ray_id, 2] = 0.0
+    if write_normal == 1:
+        normals[row, ray_id, 0] = 0.0
+        normals[row, ray_id, 1] = 0.0
+        normals[row, ray_id, 2] = 0.0
     if write_body_id == 1:
         body_ids[row, ray_id] = -1
 
@@ -331,13 +406,17 @@ def trace_rays_batch_bvh_kernel(
     mesh_ids: wp.array(dtype=wp.uint64),
     geom_xpos: wp.array2d(dtype=wp.vec3),
     geom_xmat: wp.array3d(dtype=wp.float32),
+    geom_allowed: wp.array(dtype=wp.int32),
     env_map: wp.array(dtype=wp.int32),
     ray_origins: wp.array2d(dtype=wp.vec3),
     ray_directions: wp.array2d(dtype=wp.vec3),
     max_distance: float,
+    min_distance: float,
     distances: wp.array2d(dtype=wp.float32),
     hits: wp.array2d(dtype=wp.bool),
     hit_geoms: wp.array2d(dtype=wp.int32),
+    normals: wp.array3d(dtype=wp.float32),
+    write_normal: int,
 ):
     row, ray_id = wp.tid()
     env_id = env_map[row]
@@ -347,26 +426,29 @@ def trace_rays_batch_bvh_kernel(
 
     best = max_distance
     best_geom = int(-1)
+    best_normal = wp.vec3(0.0, 0.0, 0.0)
     root = wp.bvh_get_group_root(bvh_id, env_id)
     query = wp.bvh_query_ray(bvh_id, origin, ray_dir, root)
     flat_id = int(0)
     while wp.bvh_query_next(query, flat_id):
         geom_id = flat_id - env_id * ngeom
-        if geom_id >= 0 and geom_id < ngeom:
+        if geom_id >= 0 and geom_id < ngeom and geom_allowed[geom_id] == 1:
             geom_type = geom_types[geom_id]
             if geom_type >= 0:
                 t = -1.0
+                normal = wp.vec3(0.0, 0.0, 0.0)
                 geom_rot = read_mat33_batch(geom_xmat, env_id, geom_id)
                 if geom_type == 1 or geom_type == 7:
                     mesh_idx = geom_mesh_ids[geom_id]
                     if mesh_idx >= 0:
-                        t = ray_mesh_distance(
+                        t, normal = ray_mesh_hit(
                             mesh_ids[mesh_idx],
                             origin,
                             ray_dir,
                             geom_xpos[env_id, geom_id],
                             geom_rot,
-                            best,
+                            min_distance,
+                            max_distance,
                         )
                 else:
                     t = trace_geom(
@@ -377,9 +459,22 @@ def trace_rays_batch_bvh_kernel(
                         geom_sizes[geom_id],
                         geom_rot,
                     )
-                if t >= 0.0 and t < best:
+                    if write_normal == 1 and t >= min_distance:
+                        normal = trace_geom_normal(
+                            geom_type,
+                            origin,
+                            ray_dir,
+                            geom_xpos[env_id, geom_id],
+                            geom_sizes[geom_id],
+                            geom_rot,
+                            t,
+                        )
+                if (t >= min_distance and t < best) or (
+                    t == best and best_geom >= 0 and geom_id < best_geom
+                ):
                     best = t
                     best_geom = geom_id
+                    best_normal = normal
 
     if best_geom >= 0:
         distances[row, ray_id] = best
@@ -389,3 +484,7 @@ def trace_rays_batch_bvh_kernel(
         distances[row, ray_id] = max_distance
         hits[row, ray_id] = False
         hit_geoms[row, ray_id] = -1
+    if write_normal == 1:
+        normals[row, ray_id, 0] = best_normal[0]
+        normals[row, ray_id, 1] = best_normal[1]
+        normals[row, ray_id, 2] = best_normal[2]

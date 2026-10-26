@@ -5,7 +5,7 @@ mesh, and hfield fields the mjbatch profile reads from a ``mujoco.MjModel``,
 but out of the warp arrays of a compiled ``mujoco_warp.Model`` (e.g. from
 ``mujoco_warp.put_model``), converts them to plain NumPy on the cold path, and
 feeds the shared, profile-neutral descriptor build in ``uni_ray.mjbatch``.
-The result is the same immutable :class:`MjBatchCollision` — the caster, the
+The result is the same immutable :class:`RayCollisionDescription` — the caster, the
 pose-sync contract, and the hot path are identical for both profiles.
 
 The ``mujoco_warp`` import is lazy and confined to this module, exactly like
@@ -26,8 +26,9 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from unisim.optional import OptionalDependencyError
+from unisim.ray_query import RayCollisionDescription
 
-from .mjbatch import MjBatchCollision, _build_collision_description, _ModelSceneData
+from .mjbatch import _build_collision_description, _ModelSceneData
 
 if TYPE_CHECKING:
     from unisim.ray_query import RayCaster
@@ -45,7 +46,7 @@ def _import_mujoco_warp() -> Any:
     return mujoco_warp
 
 
-def build_collision_description(mjw_model: Any) -> MjBatchCollision:
+def build_collision_description(mjw_model: Any) -> RayCollisionDescription:
     """Read a ``mujoco_warp.Model`` once and freeze it into a collision descriptor.
 
     Same semantics as ``uni_ray.mjbatch.build_collision_description``: plane
@@ -58,9 +59,7 @@ def build_collision_description(mjw_model: Any) -> MjBatchCollision:
     """
     mujoco_warp = _import_mujoco_warp()
     if not isinstance(mjw_model, mujoco_warp.Model):
-        raise TypeError(
-            f"mjw_model must be a mujoco_warp.Model, got {type(mjw_model).__name__}"
-        )
+        raise TypeError(f"mjw_model must be a mujoco_warp.Model, got {type(mjw_model).__name__}")
     return _build_collision_description(_scene_data_from_mjwarp(mjw_model))
 
 
@@ -123,7 +122,7 @@ def create_ray_caster(
     return caster
 
 
-def rebuild_caster_from_mjwarp(caster: Any, mjw_model: Any) -> MjBatchCollision:
+def rebuild_caster_from_mjwarp(caster: Any, mjw_model: Any) -> RayCollisionDescription:
     """Re-read an updated ``mujoco_warp.Model`` and rebuild ``caster``'s scene.
 
     The mjwarp-profile counterpart of

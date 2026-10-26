@@ -13,6 +13,7 @@ import textwrap
 
 import numpy as np
 import pytest
+from unisim.ray_query import RayTraceFilter, RayTraceOutputs
 
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the hot-path audits")
 wp = pytest.importorskip("warp", reason="warp-lang is required for the hot-path audits")
@@ -62,17 +63,24 @@ def _make_caster():
 def _drive_hot_path(caster, data, iterations: int) -> None:
     origins = np.zeros((64, 3))
     directions = np.tile(np.array([[0.0, 0.0, -1.0]]), (64, 1))
+    outputs = RayTraceOutputs(normal=True)
+    ray_filter = RayTraceFilter(allowed_geom_ids=(0, 1, 2, 3))
     for iteration in range(iterations):
         pos = np.array(data.xpos, copy=True)[None].repeat(2, axis=0)
         pos[:, 1, 2] += 0.001 * iteration
         caster.update_pose(pos, np.array(data.xquat, copy=True)[None].repeat(2, axis=0))
-        caster.trace(origins, directions, max_distance=10.0)
+        caster.trace(
+            origins,
+            directions,
+            max_distance=10.0,
+            outputs=outputs,
+            min_distance=0.1,
+            ray_filter=ray_filter,
+        )
 
 
 def test_no_new_warp_allocations_or_bvh_mesh_rebuilds(monkeypatch) -> None:
-    spies = {
-        name: _Spy(getattr(wp, name)) for name in ("array", "zeros", "empty", "full")
-    }
+    spies = {name: _Spy(getattr(wp, name)) for name in ("array", "zeros", "empty", "full")}
     for name, spy in spies.items():
         monkeypatch.setattr(wp, name, spy)
     bvh_spy = _Spy(wp.Bvh)
