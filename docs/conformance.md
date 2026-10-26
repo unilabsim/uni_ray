@@ -101,6 +101,17 @@ filter/minimum-distance/normal host-tensor parity on a public hfield descriptor.
   and sets `min_distance`; after the first filter mask upload, the same zero
   allocation/rebuild invariant holds.
 
+## Dynamic per-row geometry (#479)
+
+`WarpRayCaster` implements both host and tensor geometry sync. Public state is
+aligned to `RayCollisionDescription.geom_names` and carries per-row primitive
+sizes, local geom transforms, optional-slot masks, and public mesh-asset IDs.
+The Warp kernels update geom world transforms and per-environment AABBs, then
+refit the BVH on the caller's ordering boundary. Mesh vertices remain static
+assets; only which immutable mesh asset a geom row uses can change without a
+rebuild. `tests/test_dynamic_geometry.py` checks host/tensor size parity and
+optional-slot disablement.
+
 ## Hfield support (#2)
 
 Hfield geoms are triangulated once at descriptor build

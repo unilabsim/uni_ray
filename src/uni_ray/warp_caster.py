@@ -34,6 +34,8 @@ from unisim.ray_query import (
     RayCaster,
     RayCasterCapabilities,
     RayCollisionDescription,
+    RayGeometryState,
+    RayGeometryTensorView,
     RayGeomType,
     RayPoseTensorView,
     RaySceneDescription,
@@ -52,6 +54,7 @@ from .kernels import (
     write_body_poses_from_tensors_kernel,
     write_body_poses_kernel,
     write_env_map_and_validate_ids_kernel,
+    write_geometry_kernel,
     write_tensor_trace_outputs_kernel,
     zero_int32_kernel,
 )
@@ -145,10 +148,12 @@ class WarpRayCaster(RayCaster):
 
     _ray_capabilities = RayCasterCapabilities(
         supports_pose_sync=True,
+        supports_geometry_sync=True,
         supports_per_env_rays=True,
         supports_host_readback=True,
         supports_device_output=True,
         supports_tensor_pose_sync=True,
+        supports_tensor_geometry_sync=True,
         supports_tensor_rays=True,
         torch_devices=("cpu", "cuda"),
         stream_event_ownership="caller",
@@ -192,6 +197,7 @@ class WarpRayCaster(RayCaster):
         self._tensor_pos_wp: wp.array | None = None
         self._tensor_quat: Any | None = None
         self._tensor_quat_wp: wp.array | None = None
+        self._tensor_geometry: dict[str, Any] | None = None
         self._tensor_env_ids_wp: wp.array | None = None
         self._tensor_static_pattern: tuple[Any, Any] | None = None
         self._tensor_static_origins: wp.array | None = None
@@ -251,14 +257,15 @@ class WarpRayCaster(RayCaster):
         self._num_bodies = 0
         self._num_geoms = 0
         self._geom_types_dev: wp.array | None = None
-        self._geom_sizes_dev: wp.array | None = None
-        self._geom_aabb_center_dev: wp.array | None = None
-        self._geom_aabb_size_dev: wp.array | None = None
-        self._geom_mesh_ids_dev: wp.array | None = None
+        self._geom_sizes_dev: wp.array2d | None = None
+        self._mesh_aabb_center_dev: wp.array | None = None
+        self._mesh_aabb_size_dev: wp.array | None = None
+        self._geom_mesh_ids_dev: wp.array2d | None = None
         self._mesh_ids_dev: wp.array | None = None
         self._geom_body_ids_dev: wp.array | None = None
-        self._geom_local_pos_dev: wp.array | None = None
-        self._geom_local_quat_dev: wp.array | None = None
+        self._geom_local_pos_dev: wp.array2d | None = None
+        self._geom_local_quat_dev: wp.array2d | None = None
+        self._geom_enabled_dev: wp.array2d | None = None
         self._body_xpos_dev: wp.array | None = None
         self._body_xquat_dev: wp.array | None = None
         self._geom_xpos_dev: wp.array | None = None
@@ -392,6 +399,7 @@ class WarpRayCaster(RayCaster):
         self._tensor_pos_wp = None
         self._tensor_quat = None
         self._tensor_quat_wp = None
+        self._tensor_geometry = None
         self._tensor_env_ids_wp = None
         self._tensor_static_pattern = None
         self._tensor_static_origins = None
@@ -401,28 +409,25 @@ class WarpRayCaster(RayCaster):
         self._env_id_error.zero_()
         self._env_id_seen.zero_()
         device = self._device
+        num_envs = self._num_envs
 
         geom_types = np.array(
             [_KERNEL_GEOM_TYPES[geom_type] for geom_type in scene.geom_types], dtype=np.int32
         )
         geom_sizes = scene.geom_sizes.astype(np.float32).copy()
-        # The copied kernels read the cylinder/capsule half height at size[2];
-        # swap it in from the MuJoCo-style (radius, half_length, 0) layout.
-        cylindrical = (geom_types == 3) | (geom_types == 5)
-        geom_sizes[cylindrical, 2] = geom_sizes[cylindrical, 1]
-        geom_sizes[cylindrical, 1] = geom_sizes[cylindrical, 0]
-        # The contract plane is the infinite local z = 0 plane and ignores
-        # sizes; zero them so a descriptor carrying a rendering-grid size is
-        # still treated as infinite (the AABB kernel substitutes a large
-        # finite half extent for the broad phase).
-        geom_sizes[geom_types == 0] = 0.0
-        aabb_center, aabb_size = self._local_aabbs(scene, collision)
-        geom_local_quat_xyzw = scene.geom_local_quat[:, _WXYZ_TO_XYZW].astype(np.float32)
+        geom_sizes = np.broadcast_to(geom_sizes, (num_envs, num_geoms, 3)).copy()
+        mesh_aabb_center, mesh_aabb_size = self._mesh_aabbs(collision)
+        geom_local_pos = np.broadcast_to(
+            scene.geom_local_pos.astype(np.float32), (num_envs, num_geoms, 3)
+        ).copy()
+        geom_local_quat = np.broadcast_to(
+            scene.geom_local_quat.astype(np.float32), (num_envs, num_geoms, 4)
+        ).copy()
 
         self._geom_types_dev = wp.array(geom_types, dtype=wp.int32, device=device)
         self._geom_sizes_dev = wp.array(geom_sizes, dtype=wp.vec3, device=device)
-        self._geom_aabb_center_dev = wp.array(aabb_center, dtype=wp.vec3, device=device)
-        self._geom_aabb_size_dev = wp.array(aabb_size, dtype=wp.vec3, device=device)
+        self._mesh_aabb_center_dev = wp.array(mesh_aabb_center, dtype=wp.vec3, device=device)
+        self._mesh_aabb_size_dev = wp.array(mesh_aabb_size, dtype=wp.vec3, device=device)
         if collision is not None and collision.meshes:
             # wp.Mesh builds its internal BVH once here; meshes are static
             # until the next materialize/rebuild rebinds them (per-frame
@@ -435,21 +440,23 @@ class WarpRayCaster(RayCaster):
                 for mesh in collision.meshes
             ]
             mesh_ids = np.array([mesh.id for mesh in self._meshes], dtype=np.uint64)
-            geom_mesh_ids = collision.geom_mesh_ids.astype(np.int32)
+            geom_mesh_ids = np.broadcast_to(
+                collision.geom_mesh_ids.astype(np.int32), (num_envs, num_geoms)
+            ).copy()
         else:
             mesh_ids = np.zeros(0, dtype=np.uint64)
-            geom_mesh_ids = np.full(num_geoms, -1, dtype=np.int32)
+            geom_mesh_ids = np.full((num_envs, num_geoms), -1, dtype=np.int32)
         self._geom_mesh_ids_dev = wp.array(geom_mesh_ids, dtype=wp.int32, device=device)
         self._mesh_ids_dev = wp.array(mesh_ids, dtype=wp.uint64, device=device)
         self._geom_body_ids_dev = wp.array(
             scene.geom_body_ids.astype(np.int32), dtype=wp.int32, device=device
         )
-        self._geom_local_pos_dev = wp.array(
-            scene.geom_local_pos.astype(np.float32), dtype=wp.vec3, device=device
+        self._geom_local_pos_dev = wp.array(geom_local_pos, dtype=wp.vec3, device=device)
+        self._geom_local_quat_dev = wp.array(geom_local_quat, dtype=wp.vec4, device=device)
+        self._geom_enabled_dev = wp.array(
+            np.ones((num_envs, num_geoms), dtype=np.bool_), dtype=wp.bool, device=device
         )
-        self._geom_local_quat_dev = wp.array(geom_local_quat_xyzw, dtype=wp.quat, device=device)
 
-        num_envs = self._num_envs
         num_bodies = self._num_bodies
         identity_quat_xyzw = np.zeros((num_envs, num_bodies, 4), dtype=np.float32)
         identity_quat_xyzw[..., 3] = 1.0
@@ -521,6 +528,42 @@ class WarpRayCaster(RayCaster):
         self._refresh_poses(rows)
         if self._bvh is not None:
             self._bvh.refit()
+
+    def update_geometry(
+        self,
+        geometry: RayGeometryState,
+        env_ids: Sequence[int] | np.ndarray | None = None,
+    ) -> None:
+        """Write per-row sizes, local frames, masks, and mesh selections."""
+        self._require_open()
+        self._require_materialized()
+        rows = self._resolve_selected_rows(env_ids)
+        self._validate_geometry_state(geometry)
+        if not rows.size or not self._num_geoms:
+            return
+        sources = self._geometry_wp_arrays(
+            sizes=geometry.geom_sizes[rows],
+            local_pos=geometry.geom_local_pos[rows],
+            local_quat=geometry.geom_local_quat[rows],
+            enabled=geometry.geom_enabled[rows],
+            mesh_ids=geometry.geom_mesh_ids[rows],
+        )
+        wp.launch(
+            write_geometry_kernel,
+            dim=(rows.size, self._num_geoms),
+            inputs=[
+                self._env_map_for(rows),
+                *sources,
+                self._geom_sizes_dev,
+                self._geom_local_pos_dev,
+                self._geom_local_quat_dev,
+                self._geom_enabled_dev,
+                self._geom_mesh_ids_dev,
+            ],
+            device=self._device,
+        )
+        self._refresh_poses(rows)
+        self._refit_bvh()
 
     def bind_pose_layout(self, body_names: Sequence[str]) -> None:
         """Bind the exact public dynamic-body order on the cold path."""
@@ -594,6 +637,87 @@ class WarpRayCaster(RayCaster):
         self._tensor_quat = self._tensor_quat_wp._tensor
         assert scene is not None
 
+    def update_geometry_tensor(self, geometry: RayGeometryTensorView) -> None:
+        """Alias a full-batch Torch geometry view and refresh broad-phase state."""
+        import torch
+
+        self._require_open()
+        self._require_materialized()
+        self._require_tensor_layout()
+        device = self._required_tensor_device()
+        if not isinstance(geometry, RayGeometryTensorView):
+            raise TypeError("geometry must be a RayGeometryTensorView")
+        values = {
+            "sizes": self._validated_tensor(
+                geometry.geom_sizes,
+                "geometry_sizes",
+                torch,
+                device=device,
+                expected_shape=(self._num_envs, self._num_geoms, 3),
+                require_contiguous=False,
+            ),
+            "local_pos": self._validated_tensor(
+                geometry.geom_local_pos,
+                "geometry_local_pos",
+                torch,
+                device=device,
+                expected_shape=(self._num_envs, self._num_geoms, 3),
+                require_contiguous=False,
+            ),
+            "local_quat": self._validated_tensor(
+                geometry.geom_local_quat,
+                "geometry_local_quat",
+                torch,
+                device=device,
+                expected_shape=(self._num_envs, self._num_geoms, 4),
+                require_contiguous=False,
+            ),
+        }
+        for name, dtype, shape in (
+            ("enabled", torch.bool, (self._num_envs, self._num_geoms)),
+            ("mesh_ids", torch.int32, (self._num_envs, self._num_geoms)),
+        ):
+            value = getattr(geometry, f"geom_{name}")
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"ray tensor geometry_{name} must be a torch.Tensor")
+            if value.dtype != dtype:
+                raise TypeError(f"ray tensor geometry_{name} must have dtype {dtype}")
+            if tuple(value.shape) != shape:
+                raise ValueError(
+                    f"ray tensor geometry_{name} must have shape {shape}, got {tuple(value.shape)}"
+                )
+            if not bool(value.is_contiguous()):
+                raise ValueError(f"ray tensor geometry_{name} must be contiguous")
+            if self._resolve_torch_device(value.device, f"geometry_{name}") != device:
+                raise ValueError(f"ray tensor geometry_{name} must live on {device}")
+            values[name] = value
+
+        sources = self._geometry_wp_arrays(
+            sizes=values["sizes"],
+            local_pos=values["local_pos"],
+            local_quat=values["local_quat"],
+            enabled=values["enabled"],
+            mesh_ids=values["mesh_ids"],
+        )
+        with _torch_caller_stream_scope(torch, device, self._device_obj):
+            wp.launch(
+                write_geometry_kernel,
+                dim=(self._num_envs, self._num_geoms),
+                inputs=[
+                    self._all_env_map_dev,
+                    *sources,
+                    self._geom_sizes_dev,
+                    self._geom_local_pos_dev,
+                    self._geom_local_quat_dev,
+                    self._geom_enabled_dev,
+                    self._geom_mesh_ids_dev,
+                ],
+                device=self._device,
+            )
+            self._refresh_tensor_poses_all_rows()
+            self._refit_bvh()
+        self._tensor_geometry = values
+
     def trace(
         self,
         ray_origins: np.ndarray,
@@ -630,6 +754,7 @@ class WarpRayCaster(RayCaster):
                     self._geom_sizes_dev,
                     self._geom_mesh_ids_dev,
                     self._mesh_ids_dev,
+                    self._geom_enabled_dev,
                     self._geom_xpos_dev,
                     self._geom_xmat_dev,
                     geom_filter,
@@ -828,6 +953,7 @@ class WarpRayCaster(RayCaster):
                         self._geom_sizes_dev,
                         self._geom_mesh_ids_dev,
                         self._mesh_ids_dev,
+                        self._geom_enabled_dev,
                         self._geom_xpos_dev,
                         self._geom_xmat_dev,
                         geom_filter,
@@ -891,6 +1017,7 @@ class WarpRayCaster(RayCaster):
         self._tensor_pos_wp = None
         self._tensor_quat = None
         self._tensor_quat_wp = None
+        self._tensor_geometry = None
         self._tensor_env_ids_wp = None
         self._tensor_static_pattern = None
         self._tensor_static_origins = None
@@ -1157,8 +1284,10 @@ class WarpRayCaster(RayCaster):
             inputs=[
                 self._geom_types_dev,
                 self._geom_sizes_dev,
-                self._geom_aabb_center_dev,
-                self._geom_aabb_size_dev,
+                self._geom_mesh_ids_dev,
+                self._mesh_aabb_center_dev,
+                self._mesh_aabb_size_dev,
+                self._geom_enabled_dev,
                 self._geom_xpos_dev,
                 self._geom_xmat_dev,
                 self._env_map_dev,
@@ -1169,31 +1298,21 @@ class WarpRayCaster(RayCaster):
         )
 
     @staticmethod
-    def _local_aabbs(
-        scene: RaySceneDescription, collision: RayCollisionDescription | None
+    def _mesh_aabbs(
+        collision: RayCollisionDescription | None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Local-frame AABB center/half extents per geom for the broad phase."""
-        center = np.zeros((scene.num_geoms, 3), dtype=np.float32)
-        size = np.zeros((scene.num_geoms, 3), dtype=np.float32)
-        for index, (geom_type, geom_size) in enumerate(zip(scene.geom_types, scene.geom_sizes)):
-            radius = float(geom_size[0])
-            if geom_type == RayGeomType.SPHERE:
-                size[index] = radius
-            elif geom_type == RayGeomType.BOX or geom_type == RayGeomType.ELLIPSOID:
-                size[index] = geom_size
-            elif geom_type == RayGeomType.CYLINDER:
-                size[index] = (radius, radius, float(geom_size[1]))
-            elif geom_type == RayGeomType.CAPSULE:
-                size[index] = (radius, radius, float(geom_size[1]) + radius)
-            elif geom_type == RayGeomType.MESH:
-                assert collision is not None
-                points = collision.meshes[int(collision.geom_mesh_ids[index])].points
-                lower = points.min(axis=0)
-                upper = points.max(axis=0)
-                center[index] = (lower + upper) * 0.5
-                size[index] = (upper - lower) * 0.5
-            # Planes stay zero; update_aabbs_batch_kernel substitutes the
-            # infinite-plane half extent from geom_sizes directly.
+        """Local-frame AABB center/half extents for each public mesh asset."""
+
+        count = len(collision.meshes) if collision is not None else 0
+        center = np.zeros((count, 3), dtype=np.float32)
+        size = np.zeros((count, 3), dtype=np.float32)
+        if collision is None:
+            return center, size
+        for index, mesh in enumerate(collision.meshes):
+            lower = mesh.points.min(axis=0)
+            upper = mesh.points.max(axis=0)
+            center[index] = (lower + upper) * 0.5
+            size[index] = (upper - lower) * 0.5
         return center, size
 
     def _require_open(self) -> None:
@@ -1219,6 +1338,40 @@ class WarpRayCaster(RayCaster):
         result = wp.array(mask, dtype=wp.int32, device=self._device)
         self._filter_masks[ray_filter] = result
         return result
+
+    def _validate_geometry_state(self, geometry: RayGeometryState) -> None:
+        collision = self._collision
+        if collision is None:
+            raise BackendError("uni_ray dynamic geometry requires a collision descriptor")
+        if geometry.num_envs != self._num_envs or geometry.geom_names != tuple(
+            collision.geom_names
+        ):
+            raise ValueError("geometry state must match the materialized environment and geom axes")
+
+    def _geometry_wp_arrays(
+        self,
+        *,
+        sizes: Any,
+        local_pos: Any,
+        local_quat: Any,
+        enabled: Any,
+        mesh_ids: Any,
+    ) -> tuple[wp.array, wp.array, wp.array, wp.array, wp.array]:
+        if isinstance(sizes, np.ndarray):
+            return (
+                wp.array(np.ascontiguousarray(sizes), dtype=wp.vec3, device=self._device),
+                wp.array(np.ascontiguousarray(local_pos), dtype=wp.vec3, device=self._device),
+                wp.array(np.ascontiguousarray(local_quat), dtype=wp.vec4, device=self._device),
+                wp.array(np.ascontiguousarray(enabled), dtype=wp.bool, device=self._device),
+                wp.array(np.ascontiguousarray(mesh_ids), dtype=wp.int32, device=self._device),
+            )
+        return (
+            wp.from_torch(sizes, dtype=wp.vec3),
+            wp.from_torch(local_pos, dtype=wp.vec3),
+            wp.from_torch(local_quat, dtype=wp.vec4),
+            wp.from_torch(enabled, dtype=wp.bool),
+            wp.from_torch(mesh_ids, dtype=wp.int32),
+        )
 
 
 __all__ = ["WarpRayCaster"]

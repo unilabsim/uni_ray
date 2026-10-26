@@ -42,9 +42,11 @@ def compute_oriented_box_aabb(center: wp.vec3, size: wp.vec3, rot: wp.mat33):
 @wp.kernel
 def update_aabbs_batch_kernel(
     geom_types: wp.array(dtype=wp.int32),
-    geom_sizes: wp.array(dtype=wp.vec3),
-    geom_aabb_center: wp.array(dtype=wp.vec3),
-    geom_aabb_size: wp.array(dtype=wp.vec3),
+    geom_sizes: wp.array2d(dtype=wp.vec3),
+    geom_mesh_ids: wp.array2d(dtype=wp.int32),
+    mesh_aabb_center: wp.array(dtype=wp.vec3),
+    mesh_aabb_size: wp.array(dtype=wp.vec3),
+    geom_enabled: wp.array2d(dtype=wp.bool),
     geom_xpos: wp.array2d(dtype=wp.vec3),
     geom_xmat: wp.array3d(dtype=wp.float32),
     env_map: wp.array(dtype=wp.int32),
@@ -60,7 +62,7 @@ def update_aabbs_batch_kernel(
 
     lower = wp.vec3(1.0e10, 1.0e10, 1.0e10)
     upper = wp.vec3(-1.0e10, -1.0e10, -1.0e10)
-    if geom_type < 0:
+    if geom_type < 0 or not geom_enabled[env_id, geom_id]:
         lower = wp.vec3(0.0, 0.0, 0.0)
         upper = wp.vec3(0.0, 0.0, 0.0)
     elif geom_type == 0:
@@ -72,20 +74,36 @@ def update_aabbs_batch_kernel(
         # becomes effectively invisible while finite geoms (legs, boxes) are
         # unaffected. Substitute a large-but-finite half-extent for the AABB
         # only, so the BVH actually considers rays anywhere near the ground.
-        plane_x = geom_sizes[geom_id][0]
-        plane_y = geom_sizes[geom_id][1]
-        if plane_x <= 0.0:
-            plane_x = 1000.0
-        if plane_y <= 0.0:
-            plane_y = 1000.0
+        plane_x = 1000.0
+        plane_y = 1000.0
         lower, upper = compute_oriented_box_aabb(
             pos,
             wp.vec3(plane_x, plane_y, 1.0e-3),
             rot,
         )
     else:
-        aabb_center = pos + rot * geom_aabb_center[geom_id]
-        lower, upper = compute_oriented_box_aabb(aabb_center, geom_aabb_size[geom_id], rot)
+        size = geom_sizes[env_id, geom_id]
+        if geom_type == 1 or geom_type == 7:
+            mesh_index = geom_mesh_ids[env_id, geom_id]
+            if mesh_index < 0:
+                lower = wp.vec3(0.0, 0.0, 0.0)
+                upper = wp.vec3(0.0, 0.0, 0.0)
+            else:
+                center = pos + rot * mesh_aabb_center[mesh_index]
+                lower, upper = compute_oriented_box_aabb(center, mesh_aabb_size[mesh_index], rot)
+        elif geom_type == 2:
+            radius = size[0]
+            lower, upper = compute_oriented_box_aabb(pos, wp.vec3(radius, radius, radius), rot)
+        elif geom_type == 6 or geom_type == 4:
+            lower, upper = compute_oriented_box_aabb(pos, size, rot)
+        elif geom_type == 5:
+            radius = size[0]
+            lower, upper = compute_oriented_box_aabb(pos, wp.vec3(radius, radius, size[1]), rot)
+        elif geom_type == 3:
+            radius = size[0]
+            lower, upper = compute_oriented_box_aabb(
+                pos, wp.vec3(radius, radius, size[1] + radius), rot
+            )
 
     eps = wp.vec3(1.0e-4, 1.0e-4, 1.0e-4)
     lowers[flat_id] = lower - eps
@@ -118,15 +136,27 @@ def trace_geom(
 ):
     t = -1.0
     if geom_type == 0:
-        t = ray_plane_distance(ray_origin, ray_dir, center, size, rot)
+        t = ray_plane_distance(ray_origin, ray_dir, center, wp.vec3(0.0), rot)
     elif geom_type == 2:
         t = ray_sphere_distance(ray_origin, ray_dir, center, size[0])
     elif geom_type == 3:
-        t = ray_capsule_distance(ray_origin, ray_dir, center, size, rot)
+        t = ray_capsule_distance(
+            ray_origin,
+            ray_dir,
+            center,
+            wp.vec3(size[0], size[0], size[1]),
+            rot,
+        )
     elif geom_type == 4:
         t = ray_ellipsoid_distance(ray_origin, ray_dir, center, size, rot)
     elif geom_type == 5:
-        t = ray_cylinder_distance(ray_origin, ray_dir, center, size, rot)
+        t = ray_cylinder_distance(
+            ray_origin,
+            ray_dir,
+            center,
+            wp.vec3(size[0], size[0], size[1]),
+            rot,
+        )
     elif geom_type == 6:
         t = ray_box_distance(ray_origin, ray_dir, center, size, rot)
     return t
@@ -165,16 +195,16 @@ def trace_geom_normal(
     elif geom_type == 5:
         radius = wp.sqrt(point[0] * point[0] + point[1] * point[1])
         side_error = wp.abs(radius - size[0])
-        cap_error = wp.abs(wp.abs(point[2]) - size[2])
+        cap_error = wp.abs(wp.abs(point[2]) - size[1])
         if cap_error <= side_error:
             local_normal = wp.vec3(0.0, 0.0, wp.sign(point[2]))
         else:
             local_normal = wp.vec3(point[0], point[1], 0.0) / size[0]
     elif geom_type == 3:
-        if wp.abs(point[2]) < size[2]:
+        if wp.abs(point[2]) < size[1]:
             local_normal = wp.vec3(point[0], point[1], 0.0) / size[0]
         else:
-            cap_center = wp.vec3(0.0, 0.0, size[2] * wp.sign(point[2]))
+            cap_center = wp.vec3(0.0, 0.0, size[1] * wp.sign(point[2]))
             local_normal = (point - cap_center) / size[0]
     elif geom_type == 4:
         gradient = wp.vec3(
@@ -257,6 +287,30 @@ def write_body_poses_from_tensors_kernel(
         quat_w[env_id, body_id, 3],
         quat_w[env_id, body_id, 0],
     )
+
+
+@wp.kernel
+def write_geometry_kernel(
+    env_map: wp.array(dtype=wp.int32),
+    sizes: wp.array2d(dtype=wp.vec3),
+    local_pos: wp.array2d(dtype=wp.vec3),
+    local_quat: wp.array2d(dtype=wp.vec4),
+    enabled: wp.array2d(dtype=wp.bool),
+    mesh_ids: wp.array2d(dtype=wp.int32),
+    sizes_out: wp.array2d(dtype=wp.vec3),
+    local_pos_out: wp.array2d(dtype=wp.vec3),
+    local_quat_out: wp.array2d(dtype=wp.vec4),
+    enabled_out: wp.array2d(dtype=wp.bool),
+    mesh_ids_out: wp.array2d(dtype=wp.int32),
+):
+    """Scatter validated per-row geometry into caster-owned batched state."""
+    row, geom_id = wp.tid()
+    env_id = env_map[row]
+    sizes_out[env_id, geom_id] = sizes[row, geom_id]
+    local_pos_out[env_id, geom_id] = local_pos[row, geom_id]
+    local_quat_out[env_id, geom_id] = local_quat[row, geom_id]
+    enabled_out[env_id, geom_id] = enabled[row, geom_id]
+    mesh_ids_out[env_id, geom_id] = mesh_ids[row, geom_id]
 
 
 @wp.kernel
@@ -366,8 +420,8 @@ def write_tensor_trace_outputs_kernel(
 def compute_geom_poses_kernel(
     env_map: wp.array(dtype=wp.int32),
     geom_body_ids: wp.array(dtype=wp.int32),
-    geom_local_pos: wp.array(dtype=wp.vec3),
-    geom_local_quat: wp.array(dtype=wp.quat),
+    geom_local_pos: wp.array2d(dtype=wp.vec3),
+    geom_local_quat: wp.array2d(dtype=wp.vec4),
     body_xpos: wp.array2d(dtype=wp.vec3),
     body_xquat: wp.array2d(dtype=wp.quat),
     geom_xpos: wp.array2d(dtype=wp.vec3),
@@ -382,10 +436,17 @@ def compute_geom_poses_kernel(
     env_id = env_map[row]
     body_id = geom_body_ids[geom_id]
     body_quat = body_xquat[env_id, body_id]
-    geom_xpos[env_id, geom_id] = body_xpos[env_id, body_id] + wp.quat_rotate(
-        body_quat, geom_local_pos[geom_id]
+    local_quat_wxyz = geom_local_quat[env_id, geom_id]
+    local_quat = wp.quat(
+        local_quat_wxyz[1],
+        local_quat_wxyz[2],
+        local_quat_wxyz[3],
+        local_quat_wxyz[0],
     )
-    rot = wp.quat_to_matrix(body_quat) * wp.quat_to_matrix(geom_local_quat[geom_id])
+    geom_xpos[env_id, geom_id] = body_xpos[env_id, body_id] + wp.quat_rotate(
+        body_quat, geom_local_pos[env_id, geom_id]
+    )
+    rot = wp.quat_to_matrix(body_quat) * wp.quat_to_matrix(local_quat)
     geom_xmat[env_id, geom_id, 0] = rot[0, 0]
     geom_xmat[env_id, geom_id, 1] = rot[0, 1]
     geom_xmat[env_id, geom_id, 2] = rot[0, 2]
@@ -401,9 +462,10 @@ def compute_geom_poses_kernel(
 def trace_rays_batch_bvh_kernel(
     bvh_id: wp.uint64,
     geom_types: wp.array(dtype=wp.int32),
-    geom_sizes: wp.array(dtype=wp.vec3),
-    geom_mesh_ids: wp.array(dtype=wp.int32),
+    geom_sizes: wp.array2d(dtype=wp.vec3),
+    geom_mesh_ids: wp.array2d(dtype=wp.int32),
     mesh_ids: wp.array(dtype=wp.uint64),
+    geom_enabled: wp.array2d(dtype=wp.bool),
     geom_xpos: wp.array2d(dtype=wp.vec3),
     geom_xmat: wp.array3d(dtype=wp.float32),
     geom_allowed: wp.array(dtype=wp.int32),
@@ -432,14 +494,19 @@ def trace_rays_batch_bvh_kernel(
     flat_id = int(0)
     while wp.bvh_query_next(query, flat_id):
         geom_id = flat_id - env_id * ngeom
-        if geom_id >= 0 and geom_id < ngeom and geom_allowed[geom_id] == 1:
+        if (
+            geom_id >= 0
+            and geom_id < ngeom
+            and geom_allowed[geom_id] == 1
+            and geom_enabled[env_id, geom_id]
+        ):
             geom_type = geom_types[geom_id]
             if geom_type >= 0:
                 t = -1.0
                 normal = wp.vec3(0.0, 0.0, 0.0)
                 geom_rot = read_mat33_batch(geom_xmat, env_id, geom_id)
                 if geom_type == 1 or geom_type == 7:
-                    mesh_idx = geom_mesh_ids[geom_id]
+                    mesh_idx = geom_mesh_ids[env_id, geom_id]
                     if mesh_idx >= 0:
                         t, normal = ray_mesh_hit(
                             mesh_ids[mesh_idx],
@@ -456,7 +523,7 @@ def trace_rays_batch_bvh_kernel(
                         origin,
                         ray_dir,
                         geom_xpos[env_id, geom_id],
-                        geom_sizes[geom_id],
+                        geom_sizes[env_id, geom_id],
                         geom_rot,
                     )
                     if write_normal == 1 and t >= min_distance:
@@ -465,7 +532,7 @@ def trace_rays_batch_bvh_kernel(
                             origin,
                             ray_dir,
                             geom_xpos[env_id, geom_id],
-                            geom_sizes[geom_id],
+                            geom_sizes[env_id, geom_id],
                             geom_rot,
                             t,
                         )
