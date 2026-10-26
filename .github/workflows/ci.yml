@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: uni_ray
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          path: uni_ray
+      - name: Check out the pinned UniSim contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: unilabsim/unisim
+          ref: v2.2.0
+          path: unisim
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          cache-dependency-path: uni_ray/uv.lock
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        if: runner.os == 'Windows'
+      - name: Install locked development environment
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check .
+      - name: Test
+        run: uv run pytest -q
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: uni_ray
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          path: uni_ray
+      - name: Check out the pinned UniSim contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: unilabsim/unisim
+          ref: v2.2.0
+          path: unisim
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          cache-dependency-path: uni_ray/uv.lock
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install locked development environment
+        run: uv sync --locked
+      - name: mypy
+        run: uv run mypy src/uni_ray
+
+  package:
+    name: Build release distributions
+    needs: [check, typecheck]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: uni_ray
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          path: uni_ray
+      - name: Check out the pinned UniSim contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: unilabsim/unisim
+          ref: v2.2.0
+          path: unisim
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: false
+      - name: Build source distribution and universal wheel
+        run: uv build --sdist --wheel --out-dir dist
+      - name: Check distribution metadata
+        run: uvx --from twine twine check dist/*
+      - name: Install runtime dependencies
+        run: |
+          uv venv .package-venv
+          uv pip install --python .package-venv/bin/python \
+            numpy 'unisim-core==2.2.0' 'warp-lang>=1.11.0'
+      - name: Install the freshly built source distribution
+        run: >-
+          uv pip install --python .package-venv/bin/python --reinstall --no-deps
+          --no-binary uniray --no-cache --find-links dist --no-index uniray
+      - name: Smoke test installed source distribution
+        run: .package-venv/bin/python scripts/release_smoke.py
+      - name: Install the freshly built wheel only
+        run: >-
+          uv pip install --python .package-venv/bin/python --reinstall --no-deps
+          --only-binary :all: --no-cache --find-links dist --no-index uniray
+      - name: Smoke test installed wheel
+        run: .package-venv/bin/python scripts/release_smoke.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-dists
+          path: |
+            uni_ray/dist/*.tar.gz
+            uni_ray/dist/*.whl
+          if-no-files-found: error

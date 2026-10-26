@@ -5,6 +5,7 @@
 (`unisim.ray_query`). It is discovered and constructed lazily through
 `unisim.factory.create_ray_caster("uni_ray", ...)` and implements the
 `RayCaster` lifecycle: `materialize` → `update_pose` → `trace` → `close`.
+The PyPI distribution is `uniray`; the import namespace remains `uni_ray`.
 
 ## Features
 
@@ -63,6 +64,9 @@ rebuild-path timings from `benchmarks/bench_rebuild.py`.
 `benchmarks/bench_rich_queries.py` records fixed-profile kernel and end-to-end
 tensor timings for primitives, shared meshes, and hfields with normal output and
 filter density varied.
+
+Releases are tag-driven and use PyPI trusted publishing; see
+[docs/release.md](docs/release.md).
 
 ## Installation
 
