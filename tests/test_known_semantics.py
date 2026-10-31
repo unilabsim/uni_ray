@@ -2,13 +2,13 @@
 
 (a) Rays originating inside a primitive report the forward *exit* distance,
     matching ``mujoco.mj_ray`` (the upstream MuJoCo-LiDAR kernels reported
-    0.0; uni_ray deliberately deviates, see the header of
-    ``src/uni_ray/geometry.py``).
+    0.0; uniray deliberately deviates, see the header of
+    ``src/uniray/geometry.py``).
 (b) Contract planes are the infinite, double-sided local ``z = 0`` plane and
     ignore their sizes, even if a ``RaySceneDescription`` carries a nonzero
     (rendering-grid) size. ``mujoco.mj_ray`` instead treats a nonzero plane
     size as a finite grid and only reports hits approached from the upper
-    (+normal) side; uni_ray follows the contract and ``FakeRayCaster``.
+    (+normal) side; uniray follows the contract and ``FakeRayCaster``.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ wp = pytest.importorskip("warp", reason="warp-lang is required for the semantics
 
 from unisim.ray_query import RaySceneDescription  # noqa: E402
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import build_collision_description  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description  # noqa: E402
 
 ATOL = 1e-4
 
@@ -44,7 +44,7 @@ def test_inside_origin_rays_return_exit_distance_like_mj_ray() -> None:
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=5, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=5, collision=collision)
     caster.materialize(collision.scene)
     try:
         caster.update_pose(data.xpos[None], data.xquat[None])
@@ -80,7 +80,7 @@ def test_plane_sizes_are_ignored_and_hits_are_double_sided() -> None:
         geom_local_quat=np.array([[1.0, 0.0, 0.0, 0.0]]),
         geom_body_ids=np.array([0]),
     )
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=3)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=3)
     caster.materialize(scene)
     try:
         origins = np.array(
@@ -104,7 +104,7 @@ def test_mjbatch_zeroes_mjcf_plane_rendering_grid() -> None:
     )
     collision = build_collision_description(model)
     np.testing.assert_array_equal(collision.scene.geom_sizes[0], np.zeros(3))
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
     caster.materialize(collision.scene)
     try:
         # mj_ray would miss here (finite 5x5 grid, single-sided); the contract

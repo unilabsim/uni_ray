@@ -21,7 +21,7 @@ from unisim.ray_query import (
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 torch = pytest.importorskip("torch", reason="torch is required for the tensor profile")
 
-import uni_ray  # noqa: E402
+import uniray  # noqa: E402
 
 
 @pytest.fixture()
@@ -54,7 +54,7 @@ def _expected_close(actual: Any, expected: Any, **kwargs: Any) -> None:
 
 @pytest.fixture()
 def caster(scene: RaySceneDescription) -> Any:
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device=_device())
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=3, device=_device())
     caster.materialize(scene)
     caster.bind_pose_layout(scene.body_names)
     yield caster
@@ -100,7 +100,7 @@ def test_capabilities_and_import_boundary() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; import uni_ray.warp_caster; assert 'torch' not in sys.modules",
+            "import sys; import uniray.warp_caster; assert 'torch' not in sys.modules",
         ],
         env={**os.environ, "PYTHONPATH": "src" + os.pathsep + os.environ.get("PYTHONPATH", "")},
         capture_output=True,
@@ -108,7 +108,7 @@ def test_capabilities_and_import_boundary() -> None:
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1)
     capabilities = caster.get_ray_capabilities()
     assert capabilities.supports_device_output
     assert capabilities.supports_tensor_pose_sync
@@ -120,7 +120,7 @@ def test_capabilities_and_import_boundary() -> None:
 
 
 def test_factory_accepts_public_torch_device_object(scene: RaySceneDescription) -> None:
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device=_public_device())
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=3, device=_public_device())
     try:
         caster.materialize(scene)
         caster.bind_pose_layout(scene.body_names)
@@ -176,7 +176,7 @@ def test_pose_storage_can_be_replaced_after_trace(caster: Any) -> None:
 def test_layout_and_pose_validation_fail_closed(caster: Any, scene: RaySceneDescription) -> None:
     with pytest.raises(BackendError, match="already bound"):
         caster.bind_pose_layout(("world", "ball"))
-    fresh = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device=_device())
+    fresh = uniray.create_ray_caster(num_envs=2, num_rays=3, device=_device())
     fresh.materialize(scene)
     with pytest.raises(ValueError, match="scene body layout"):
         fresh.bind_pose_layout(("ball", "world"))
@@ -290,7 +290,7 @@ def test_minimal_tensor_output_omits_internal_geom_scratch(caster: Any) -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA stream ordering required")
 def test_first_use_static_filter_follows_caller_stream(scene: RaySceneDescription) -> None:
-    local = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
+    local = uniray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
     local.materialize(scene)
     local.bind_pose_layout(scene.body_names)
     local.update_pose_tensor(_pose(local))
@@ -317,7 +317,7 @@ def test_cuda_env_id_validation_is_deferred_without_hot_path_readback(
     scene: RaySceneDescription,
 ) -> None:
     """CUDA IDs remain device-resident; the bounded marker is checked only on close."""
-    local = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
+    local = uniray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
     local.materialize(scene)
     local.bind_pose_layout(scene.body_names)
     local.update_pose_tensor(_pose(local))
@@ -511,7 +511,7 @@ def test_cuda_tensor_trace_has_no_hidden_transfers_or_synchronizations(
     scene: RaySceneDescription, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep the steady-state tensor profile device-resident and asynchronous."""
-    local = uni_ray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
+    local = uniray.create_ray_caster(num_envs=2, num_rays=3, device="cuda:0")
     local.materialize(scene)
     local.bind_pose_layout(scene.body_names)
     pose = _pose(local, packet=True)

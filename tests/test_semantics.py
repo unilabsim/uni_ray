@@ -14,7 +14,7 @@ from unisim.ray_query import RaySceneDescription, RayTraceOutputs
 
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
-import uni_ray  # noqa: E402
+import uniray  # noqa: E402
 
 
 @pytest.fixture()
@@ -31,7 +31,7 @@ def scene() -> RaySceneDescription:
 
 @pytest.fixture()
 def caster(scene: RaySceneDescription):
-    caster = uni_ray.create_ray_caster(num_envs=3, num_rays=2)
+    caster = uniray.create_ray_caster(num_envs=3, num_rays=2)
     caster.materialize(scene)
     yield caster
     caster.close()
@@ -108,7 +108,7 @@ def test_zero_geom_scene_traces_as_all_miss() -> None:
         geom_local_quat=np.zeros((0, 4)),
         geom_body_ids=np.zeros((0,), dtype=np.intp),
     )
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=4)
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=4)
     caster.materialize(empty_scene)
     try:
         caster.update_pose(np.zeros((2, 1, 3)), np.tile([1.0, 0.0, 0.0, 0.0], (2, 1, 1)))
@@ -127,7 +127,7 @@ def test_zero_geom_scene_traces_as_all_miss() -> None:
 
 
 def test_materialize_rejects_wrong_types_and_sizes() -> None:
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1)
     with pytest.raises(TypeError, match="RaySceneDescription"):
         caster.materialize("not a scene")
     zero_sized = RaySceneDescription(
@@ -157,7 +157,7 @@ def test_collision_descriptor_mismatch_fails(caster, scene: RaySceneDescription)
     mismatch = RayCollisionDescription(
         scene=other_scene, meshes=(), geom_mesh_ids=np.full(2, -1, dtype=np.intp)
     )
-    fresh = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=mismatch)
+    fresh = uniray.create_ray_caster(num_envs=1, num_rays=1, collision=mismatch)
     with pytest.raises(ValueError, match="does not match"):
         fresh.materialize(scene)
     fresh.close()
@@ -183,7 +183,7 @@ def test_mesh_geom_with_collision_but_no_meshes_fails_closed() -> None:
         geom_local_quat=np.array([[1.0, 0.0, 0.0, 0.0]]),
         geom_body_ids=np.array([0]),
     )
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1)
     with pytest.raises(UnsupportedCapabilityError):
         caster.materialize(mesh_scene)
     caster.close()

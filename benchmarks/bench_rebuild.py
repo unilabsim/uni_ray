@@ -1,6 +1,6 @@
 """Cold-path rebuild benchmark for the mjbatch Warp ray caster (#2).
 
-uni_ray-only (the rebuild API has no mujoco-warp counterpart): times the
+uniray-only (the rebuild API has no mujoco-warp counterpart): times the
 explicit scene-replacement path added for runtime geometry randomization,
 on a fixed (num_envs, num_rays) batch over a mesh-heavy scene (24 mesh geoms
 sharing one ~2208-triangle asset + plane):
@@ -38,8 +38,8 @@ import numpy as np
 import warp as wp
 from bench_vs_mjwarp import _build_dense_mesh_scene_xml, _poses, _rays
 
-import uni_ray
-from uni_ray.mjbatch import build_collision_description
+import uniray
+from uniray.backends.mjbatch import build_collision_description
 
 TRACE_BATCH = (256, 512)
 MAX_DISTANCE = 10.0
@@ -93,7 +93,7 @@ def main() -> None:
     origins, directions = _rays(rng, num_rays)
 
     with wp.ScopedDevice(device):
-        caster = uni_ray.create_ray_caster(
+        caster = uniray.create_ray_caster(
             num_envs=num_envs, num_rays=num_rays, collision=collision_v1, device=device
         )
         caster.materialize(collision_v1.scene)

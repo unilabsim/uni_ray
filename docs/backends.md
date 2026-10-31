@@ -1,6 +1,6 @@
 # Backend profiles: mjbatch, mjwarp, and motrix (#300, #301)
 
-uni_ray ships three cold-path profiles that produce equivalent immutable
+uniray ships three cold-path profiles that produce equivalent immutable
 collision descriptors and bind the **same** caster, pose-sync contract, and
 kernels. Portable callers should consume UniSim's public
 `RayCollisionDescription`; the profile builders below remain engine-specific
@@ -8,12 +8,12 @@ conveniences for direct model access:
 
 | Profile | Builder | Input |
 |---|---|---|
-| mjbatch | `uni_ray.mjbatch.build_collision_description` | `mujoco.MjModel` |
-| mjwarp | `uni_ray.mjwarp.build_collision_description` | `mujoco_warp.Model` (e.g. from `mujoco_warp.put_model`) |
-| motrix | `uni_ray.motrix.build_collision_description` | `motrixsim.SceneModel` (e.g. from `motrixsim.load_model` / `load_mjcf_str`) |
+| mjbatch | `uniray.backends.mjbatch.build_collision_description` | `mujoco.MjModel` |
+| mjwarp | `uniray.backends.mjwarp.build_collision_description` | `mujoco_warp.Model` (e.g. from `mujoco_warp.put_model`) |
+| motrix | `uniray.backends.motrix.build_collision_description` | `motrixsim.SceneModel` (e.g. from `motrixsim.load_model` / `load_mjcf_str`) |
 
 All builders snapshot their model's fields into a shared plain-NumPy
-extraction (`uni_ray.mjbatch._ModelSceneData`) and run one profile-neutral
+extraction (`uniray.backends.mjbatch._ModelSceneData`) and run one profile-neutral
 descriptor build (`_build_collision_description`), so geom typing, plane-size
 zeroing, mesh dedup, and hfield triangulation behave identically. Each
 profile's runtime import (`mujoco` / `mujoco_warp` / `motrixsim`) is lazy and
@@ -35,21 +35,21 @@ mj_model = mujoco.MjModel.from_xml_string(SCENE_XML)
 mjw_model = mjw.put_model(mj_model)
 
 # Option A: descriptor + the UniSim plugin factory (same as mjbatch).
-from uni_ray.mjwarp import build_collision_description
+from uniray.backends.mjwarp import build_collision_description
 from unisim.factory import create_ray_caster
 
 collision = build_collision_description(mjw_model)
-caster = create_ray_caster("uni_ray", num_envs=256, num_rays=512, collision=collision)
+caster = create_ray_caster("uniray", num_envs=256, num_rays=512, collision=collision)
 caster.materialize(collision.scene)
 
 # Option B: one-call convenience (build + create + materialize).
-from uni_ray.mjwarp import create_ray_caster as create_mjwarp_caster
+from uniray.backends.mjwarp import create_ray_caster as create_mjwarp_caster
 
 caster = create_mjwarp_caster(mjw_model, num_envs=256, num_rays=512)
 
 # Geometry randomization re-put_model's the mutated MjModel and goes through
 # the explicit cold-path rebuild.
-from uni_ray.mjwarp import rebuild_caster_from_mjwarp
+from uniray.backends.mjwarp import rebuild_caster_from_mjwarp
 
 rebuild_caster_from_mjwarp(caster, mjw.put_model(mutated_mj_model))
 ```
@@ -84,7 +84,7 @@ Measured probe (`benchmarks/bench_device_pose_probe.py`, dense 13-body scene,
 RTX 4090, 100 iterations): reading `xpos`+`xquat` back from an mjwarp `Data`
 (D2H into preallocated host buffers, sync-scoped) costs
 
-| num_envs | mjw xpos+xquat D2H (ms) | uni_ray update_pose (ms) | D2H / update_pose |
+| num_envs | mjw xpos+xquat D2H (ms) | uniray update_pose (ms) | D2H / update_pose |
 |---|---|---|---|
 | 64 | 0.0144 | 0.1120 | 0.13x |
 | 256 | 0.0218 | 0.1551 | 0.14x |
@@ -121,7 +121,7 @@ Usage mirrors the mjwarp profile; the input is a loaded `motrixsim.SceneModel`:
 
 ```python
 import motrixsim as ms
-from uni_ray.motrix import build_collision_description, create_ray_caster
+from uniray.backends.motrix import build_collision_description, create_ray_caster
 
 model = ms.load_mjcf_str(SCENE_XML)          # or ms.load_model(path)
 collision = build_collision_description(model)  # cold path, plain NumPy out
@@ -165,7 +165,7 @@ limit (motrixsim-core 0.10.1, probed on RTX 4090 / Linux x86_64):
 | Profile: pose-sync | **implemented** | Host NumPy body pos/quat through `update_pose`, shared caster; link-pose mapping above is test-pinned |
 | Profile: static-map | covered by pose-sync | A materialized caster without `update_pose` traces the identity-pose static scene |
 | Profile: native | **unsupported** | No general batch raycast API in motrixsim-core 0.10.1 (`TerrainScanner` is terrain-only) |
-| Outputs | as uni_ray core | distance/hit/geom_id/body_id/hit_point and optional normals are exact; rich filters and `min_distance` follow the shared core contract |
+| Outputs | as uniray core | distance/hit/geom_id/body_id/hit_point and optional normals are exact; rich filters and `min_distance` follow the shared core contract |
 
 ### MuJoCo-vs-MotrixSim semantic differences found
 
@@ -195,7 +195,7 @@ limit (motrixsim-core 0.10.1, probed on RTX 4090 / Linux x86_64):
 
 - `motrixsim-core==0.10.1` initializes fine on this machine (RTX 4090,
   driver 13.0); scene loading and descriptor extraction are host-side, and
-  uni_ray's caster runs on warp as usual — no MotrixSim GPU requirement was
+  uniray's caster runs on warp as usual — no MotrixSim GPU requirement was
   hit.
 - The adapter never touches `SceneData` on the hot path; `SceneData` appears
   only in the *consumer* pose mapping (and in tests).
@@ -209,7 +209,7 @@ limit (motrixsim-core 0.10.1, probed on RTX 4090 / Linux x86_64):
   mesh/hfield/geom-data changes require the explicit cold-path `rebuild`
   (`rebuild_caster_from_mjwarp` for the mjwarp profile).
 - `mujoco_warp` missing → `OptionalDependencyError` naming the extra;
-  `import uni_ray`, `uni_ray.mjwarp`, and factory discovery are unaffected.
+  `import uniray`, `uniray.backends.mjwarp`, and factory discovery are unaffected.
 
 ## Known limitations
 

@@ -18,9 +18,9 @@ from unisim.ray_query import RayTraceFilter, RayTraceOutputs
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the hot-path audits")
 wp = pytest.importorskip("warp", reason="warp-lang is required for the hot-path audits")
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import build_collision_description  # noqa: E402
-from uni_ray.warp_caster import WarpRayCaster  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description  # noqa: E402
+from uniray.warp_caster import WarpRayCaster  # noqa: E402
 
 AUDIT_XML = """
 <mujoco>
@@ -55,7 +55,7 @@ def _make_caster():
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=64, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=64, collision=collision)
     caster.materialize(collision.scene)
     return caster, data
 
@@ -117,9 +117,9 @@ def test_no_mujoco_or_xml_or_descriptor_on_hot_path() -> None:
         import numpy as np
 
         import mujoco
-        import uni_ray
-        import uni_ray.mjbatch
-        from uni_ray.mjbatch import build_collision_description
+        import uniray
+        import uniray.backends.mjbatch
+        from uniray.backends.mjbatch import build_collision_description
 
         xml = '''
         <mujoco>
@@ -136,7 +136,7 @@ def test_no_mujoco_or_xml_or_descriptor_on_hot_path() -> None:
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
         collision = build_collision_description(model)
-        caster = uni_ray.create_ray_caster(num_envs=1, num_rays=16, collision=collision)
+        caster = uniray.create_ray_caster(num_envs=1, num_rays=16, collision=collision)
         caster.materialize(collision.scene)
 
         # Cold path done. Remove mujoco entirely: any MjData access or XML
@@ -156,7 +156,7 @@ def test_no_mujoco_or_xml_or_descriptor_on_hot_path() -> None:
         def _poisoned(*args, **kwargs):
             raise AssertionError("descriptor rebuilt on the hot path")
 
-        uni_ray.mjbatch.build_collision_description = _poisoned
+        uniray.backends.mjbatch.build_collision_description = _poisoned
 
         pos = np.tile(data.xpos[None], (1, 1, 1))
         quat = np.tile(data.xquat[None], (1, 1, 1))

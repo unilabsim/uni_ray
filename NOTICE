@@ -3,7 +3,7 @@
 ## MuJoCo-LiDAR
 
 The analytic ray-primitive intersection functions and BVH/AABB trace kernels in
-`src/uni_ray/geometry.py` and `src/uni_ray/kernels.py` are copied (with the
+`src/uniray/geometry.py` and `src/uniray/kernels.py` are copied (with the
 adaptations noted in each file's header) from MuJoCo-LiDAR:
 
 - Repository: https://github.com/discoverse-dev/MuJoCo-LiDAR

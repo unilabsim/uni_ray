@@ -93,7 +93,7 @@ def _default_device() -> str:
 def _torch_int64_view(tensor: Any) -> wp.array:
     """Alias a contiguous public int64 ID tensor without copying."""
     if not _LITTLE_ENDIAN:
-        raise RuntimeError("uni_ray tensor environment IDs require a little-endian host")
+        raise RuntimeError("uniray tensor environment IDs require a little-endian host")
     view = wp.array(
         ptr=tensor.data_ptr(),
         dtype=wp.int64,
@@ -144,7 +144,7 @@ def _has_non_overlapping_strides(shape: tuple[int, ...], strides: tuple[int, ...
 class WarpRayCaster(RayCaster):
     """Batched Warp ray caster with NumPy and Torch-native query profiles."""
 
-    caster_type = "uni_ray"
+    caster_type = "uniray"
 
     _ray_capabilities = RayCasterCapabilities(
         supports_pose_sync=True,
@@ -294,7 +294,7 @@ class WarpRayCaster(RayCaster):
         self._require_open()
         if self._scene is not None:
             raise BackendError(
-                "uni_ray caster is already materialized; use rebuild() to replace the scene"
+                "uniray caster is already materialized; use rebuild() to replace the scene"
             )
         if not isinstance(scene, RaySceneDescription):
             raise TypeError("scene must be a RaySceneDescription")
@@ -314,8 +314,8 @@ class WarpRayCaster(RayCaster):
 
         This is the explicit runtime-geometry-randomization path: pass a
         freshly built ``collision`` descriptor (e.g. from
-        ``uni_ray.mjbatch.build_collision_description`` on an updated MjModel,
-        or the ``uni_ray.mjbatch.rebuild_caster_from_model`` convenience) to
+        ``uniray.backends.mjbatch.build_collision_description`` on an updated MjModel,
+        or the ``uniray.backends.mjbatch.rebuild_caster_from_model`` convenience) to
         replace geom sizes/local poses and mesh/hfield data, or pass a bare
         ``scene`` to change geom sizes/local poses while reusing the mesh
         data of the descriptor already bound to this caster. Exactly one of
@@ -351,7 +351,7 @@ class WarpRayCaster(RayCaster):
         """(Re)allocate all scene-dependent state; cold path only."""
         if RayGeomType.MESH in scene.geom_types and collision is None:
             raise UnsupportedCapabilityError(
-                "uni_ray mesh support requires a public RayCollisionDescription "
+                "uniray mesh support requires a public RayCollisionDescription "
                 "passed as "
                 "create_ray_caster(..., collision=...) or rebuild(collision=...)"
             )
@@ -381,7 +381,7 @@ class WarpRayCaster(RayCaster):
             required = _POSITIVE_SIZE_DIMS.get(geom_type, ())
             if any(float(size[dim]) <= 0.0 for dim in required):
                 raise ValueError(
-                    f"uni_ray requires positive sizes for geom type "
+                    f"uniray requires positive sizes for geom type "
                     f"'{geom_type.value}' dims {required}, got {tuple(size)}"
                 )
 
@@ -570,7 +570,7 @@ class WarpRayCaster(RayCaster):
         self._require_open()
         scene = self._require_materialized()
         if self._tensor_layout is not None:
-            raise BackendError("uni_ray caster tensor pose layout is already bound")
+            raise BackendError("uniray caster tensor pose layout is already bound")
         if isinstance(body_names, (str, bytes)) or not isinstance(body_names, Sequence):
             raise TypeError("ray tensor body_names must be a sequence of strings")
         names = tuple(body_names)
@@ -1110,7 +1110,7 @@ class WarpRayCaster(RayCaster):
 
     def _require_tensor_layout(self) -> tuple[str, ...]:
         if self._tensor_layout is None:
-            raise BackendError("uni_ray caster requires bind_pose_layout before tensor queries")
+            raise BackendError("uniray caster requires bind_pose_layout before tensor queries")
         return self._tensor_layout
 
     def _resolve_torch_device(self, device: Any, name: str) -> str:
@@ -1131,7 +1131,7 @@ class WarpRayCaster(RayCaster):
     def _required_tensor_device(self) -> str:
         label = self._tensor_pose_device
         if label is None:
-            raise BackendError("uni_ray caster requires update_pose_tensor before tensor queries")
+            raise BackendError("uniray caster requires update_pose_tensor before tensor queries")
         return label
 
     def _validated_tensor(
@@ -1317,11 +1317,11 @@ class WarpRayCaster(RayCaster):
 
     def _require_open(self) -> None:
         if self._closed:
-            raise BackendError("uni_ray caster is closed")
+            raise BackendError("uniray caster is closed")
 
     def _require_materialized(self) -> RaySceneDescription:
         if self._scene is None:
-            raise BackendError("uni_ray caster must be materialized before querying")
+            raise BackendError("uniray caster must be materialized before querying")
         return self._scene
 
     def _geom_filter_array(self, ray_filter: RayTraceFilter | None) -> wp.array:
@@ -1342,7 +1342,7 @@ class WarpRayCaster(RayCaster):
     def _validate_geometry_state(self, geometry: RayGeometryState) -> None:
         collision = self._collision
         if collision is None:
-            raise BackendError("uni_ray dynamic geometry requires a collision descriptor")
+            raise BackendError("uniray dynamic geometry requires a collision descriptor")
         if geometry.num_envs != self._num_envs or geometry.geom_names != tuple(
             collision.geom_names
         ):

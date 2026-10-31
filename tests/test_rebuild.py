@@ -20,8 +20,8 @@ from unisim.ray_query import RayGeomType, RayTraceFilter, RayTraceOutputs
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the rebuild tests")
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import (  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import (  # noqa: E402
     build_collision_description,
     rebuild_caster_from_model,
 )
@@ -91,7 +91,7 @@ def _make_caster(xml: str) -> tuple:
     model = mujoco.MjModel.from_xml_string(xml)
     data = mujoco.MjData(model)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=NUM_ENVS, num_rays=RAY_ORIGINS.shape[0], collision=collision
     )
     caster.materialize(collision.scene)
@@ -249,7 +249,7 @@ def test_rebuild_validation() -> None:
     with pytest.raises(ValueError, match="only geom sizes"):
         caster.rebuild(scene=same_count_changed_type)
 
-    fresh = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    fresh = uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
     with pytest.raises(BackendError, match="materialized"):
         fresh.rebuild(collision)
     fresh.close()

@@ -22,8 +22,8 @@ from unisim.ray_query import RayPoseTensorView  # noqa: E402
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the hfield tests")
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import build_collision_description  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description  # noqa: E402
 
 ATOL = 1e-4
 NUM_RAYS = 512
@@ -138,7 +138,7 @@ def test_hfield_lifecycle_and_correctness_vs_mj_ray() -> None:
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=NUM_RAYS, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=NUM_RAYS, collision=collision)
     caster.materialize(collision.scene)
 
     origins, directions = _rays()
@@ -165,7 +165,7 @@ def test_public_hfield_descriptor_supports_rich_tensor_query_parity() -> None:
     mujoco.mj_forward(model, data)
     collision = ray_collision_from_mujoco_model(model)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=1, num_rays=NUM_RAYS, collision=collision, device=device
     )
     caster.materialize(collision.scene)
@@ -240,7 +240,7 @@ def test_public_hfield_descriptor_returns_native_face_normal() -> None:
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     collision = ray_collision_from_mujoco_model(model)
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
     caster.materialize(collision.scene)
     try:
         origin = np.array([[-0.75, -0.875, 2.0]])
@@ -267,7 +267,7 @@ def test_hfield_geom_pose_follows_body_pose() -> None:
     model = mujoco.MjModel.from_xml_string(MOVING_TERRAIN_XML)
     data = mujoco.MjData(model)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=NUM_RAYS, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=NUM_RAYS, collision=collision)
     caster.materialize(collision.scene)
     origins, directions = _rays()
 
@@ -301,7 +301,7 @@ def test_hfield_tensor_path_follows_body_pose() -> None:
     model = mujoco.MjModel.from_xml_string(MOVING_TERRAIN_XML)
     data = mujoco.MjData(model)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=NUM_RAYS, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=NUM_RAYS, collision=collision)
     caster.materialize(collision.scene)
     origins, directions = _rays()
 

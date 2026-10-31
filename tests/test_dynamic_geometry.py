@@ -16,7 +16,7 @@ from unisim.ray_query import (
     RaySceneDescription,
 )
 
-import uni_ray
+import uniray
 
 
 def _scene() -> RaySceneDescription:
@@ -64,7 +64,7 @@ def _prepare(caster):
 
 
 def test_host_geometry_updates_primitive_sizes_and_optional_slots() -> None:
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=1, device="cpu")
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=1, device="cpu")
     scene = _scene()
     caster.materialize(scene)
     caster.update_geometry(_geometry())
@@ -86,7 +86,7 @@ def test_host_geometry_updates_primitive_sizes_and_optional_slots() -> None:
 
 
 def test_tensor_geometry_has_host_parity_without_hidden_copy() -> None:
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=1, device="cpu")
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=1, device="cpu")
     _prepare(caster)
     caster.update_geometry_tensor(
         RayGeometryTensorView(
@@ -138,7 +138,7 @@ def test_dynamic_geometry_selects_immutable_mesh_assets() -> None:
         meshes=meshes,
         geom_mesh_ids=np.array([0], dtype=np.intp),
     )
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=1, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=1, collision=collision)
     caster.materialize(scene)
     caster.update_geometry(
         RayGeometryState(

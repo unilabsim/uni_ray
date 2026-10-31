@@ -1,6 +1,6 @@
 """MotrixSim-profile adapter tests (#301).
 
-The MotrixSim adapter (``uni_ray.motrix``) sources the collision descriptor
+The MotrixSim adapter (``uniray.backends.motrix``) sources the collision descriptor
 from a ``motrixsim.SceneModel`` and feeds the shared profile-neutral
 descriptor build, so the caster, pose-sync contract, and kernels are
 identical to the other profiles. These tests pin: descriptor extraction
@@ -24,8 +24,8 @@ from unisim.ray_query import RayCaster, RayGeomType, RayTraceResult
 ms = pytest.importorskip("motrixsim", reason="motrixsim-core is required for the motrix profile")
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
-import uni_ray  # noqa: E402
-from uni_ray.motrix import (  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.motrix import (  # noqa: E402
     build_collision_description,
     create_ray_caster,
     rebuild_caster_from_motrix,
@@ -145,7 +145,7 @@ def test_minimal_trace_through_plugin_contract() -> None:
 
     from unisim.factory import create_ray_caster as factory_create
 
-    caster = factory_create("uni_ray", num_envs=1, num_rays=3, collision=collision)
+    caster = factory_create("uniray", num_envs=1, num_rays=3, collision=collision)
     assert isinstance(caster, RayCaster)  # no motrixsim types leak out
     caster.materialize(collision.scene)
     origins, directions = _down_rays()
@@ -183,7 +183,7 @@ def test_hfield_trace_matches_compiled_heights() -> None:
     directions = np.tile([[0.0, 0.0, -1.0]], (len(points), 1))
     expected = np.array([2.0 - h for _, _, h in points])
 
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=len(points), collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=len(points), collision=collision)
     caster.materialize(collision.scene)
     result = caster.trace(origins, directions, max_distance=10.0)
     assert np.array(result.hit)[0].all()
@@ -262,11 +262,11 @@ def test_device_output_and_dynamic_geometry_fail_closed() -> None:
     model = ms.load_mjcf_str(MINI_XML)
     collision = build_collision_description(model)
 
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
     assert caster.get_ray_capabilities().supports_device_output
     caster.close()
     with pytest.raises(TypeError, match="device_output"):
-        uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision, device_output=True)
+        uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision, device_output=True)
 
     # Dynamic geometry outside the explicit cold-path rebuild has no API:
     # re-materializing a bound caster (geometry change without rebuild) fails.

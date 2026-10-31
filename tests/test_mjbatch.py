@@ -9,7 +9,7 @@ from unisim.ray_query import RayGeomType
 
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the mjbatch builder")
 
-from uni_ray.mjbatch import build_collision_description  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description  # noqa: E402
 
 SCENE_XML = """
 <mujoco>

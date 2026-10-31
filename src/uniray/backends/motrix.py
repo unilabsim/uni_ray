@@ -1,10 +1,10 @@
 """Cold-path ``motrixsim.SceneModel`` → collision descriptor builder (#301).
 
-This is the MotrixSim profile of the uni_ray adapter: it reads geom shapes,
+This is the MotrixSim profile of the uniray adapter: it reads geom shapes,
 sizes, local poses, link ownership, and hfield height data out of a loaded
 ``motrixsim.SceneModel`` (e.g. from ``motrixsim.load_model`` or
 ``load_mjcf_str``), converts them to plain NumPy on the cold path, and feeds
-the shared, profile-neutral descriptor build in ``uni_ray.mjbatch``. The
+the shared, profile-neutral descriptor build in ``uniray.backends.mjbatch``. The
 result is the same immutable :class:`RayCollisionDescription` — the caster, the
 pose-sync contract, and the hot path are identical for all profiles. No
 ``motrixsim`` API is touched after descriptor construction; in particular
@@ -81,7 +81,7 @@ def _import_motrixsim() -> Any:
         import motrixsim
     except ImportError as error:
         raise OptionalDependencyError(
-            "uni_ray.motrix requires the optional dependency 'motrixsim-core==0.10.1', "
+            "uniray.backends.motrix requires the optional dependency 'motrixsim-core==0.10.1', "
             "which is not installed; it ships cp310-only wheels, so install the "
             "'uni-ray[motrix]' extra in a Python 3.10 environment (see docs/backends.md)"
         ) from error
@@ -146,7 +146,7 @@ def _scene_data_from_motrix(scene_model: Any) -> _ModelSceneData:
     if unsupported:
         details = "; ".join(unsupported)
         raise UnsupportedCapabilityError(
-            f"uni_ray motrix profile does not support: {details}. No geometry was "
+            f"uniray motrix profile does not support: {details}. No geometry was "
             "dropped or substituted; remove the unsupported geoms or use a "
             "different profile"
         )
@@ -214,16 +214,16 @@ def create_ray_caster(
     """Build the descriptor from ``scene_model`` and return a bound caster.
 
     Convenience for the MotrixSim profile: equivalent to
-    ``uni_ray.create_ray_caster(num_envs, num_rays, collision=
+    ``uniray.create_ray_caster(num_envs, num_rays, collision=
     build_collision_description(scene_model), **kwargs)`` followed by
     ``materialize``. The returned object is a plain
     :class:`unisim.ray_query.RayCaster`; body poses are the contract-specified
     identity until the first ``update_pose``.
     """
-    import uni_ray
+    import uniray
 
     collision = build_collision_description(scene_model)
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=num_envs, num_rays=num_rays, collision=collision, **kwargs
     )
     caster.materialize(collision.scene)
@@ -234,11 +234,11 @@ def rebuild_caster_from_motrix(caster: Any, scene_model: Any) -> RayCollisionDes
     """Re-read an updated ``motrixsim.SceneModel`` and rebuild ``caster``'s scene.
 
     The MotrixSim-profile counterpart of
-    ``uni_ray.mjbatch.rebuild_caster_from_model``: geometry randomization
+    ``uniray.backends.mjbatch.rebuild_caster_from_model``: geometry randomization
     produces a fresh ``SceneModel``, which this binds through the explicit
     cold-path ``rebuild``. Never invoked by ``update_pose``/``trace``.
     """
-    from .warp_caster import WarpRayCaster
+    from ..warp_caster import WarpRayCaster
 
     if not isinstance(caster, WarpRayCaster):
         raise TypeError(f"caster must be a WarpRayCaster, got {type(caster).__name__}")

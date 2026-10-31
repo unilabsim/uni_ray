@@ -1,0 +1,4 @@
+[submodule "third_party/unisim"]
+	path = third_party/unisim
+	url = https://github.com/unilabsim/unisim.git
+	branch = feat/uniray-plugin-namespace

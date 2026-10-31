@@ -3,17 +3,17 @@ requires = ["uv_build>=0.12.1,<0.13"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "uni_ray"
+module-name = "uniray"
 
 [project]
 name = "uniray"
-version = "0.1.0"
+version = "0.1.1"
 description = "Warp-accelerated ray caster plugin for the UniSim ray-query contract"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "UniSim Authors" }]
 requires-python = ">=3.10,<3.14"
-dependencies = ["numpy", "unisim-core>=2.2.0"]
+dependencies = ["numpy", "unisim-core>=2.3.0"]
 keywords = ["physics", "simulation", "robotics", "ray-casting", "lidar"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -41,7 +41,7 @@ viz = ["viser"]
 [dependency-groups]
 # The dev group installs the optional runtimes so the full test suite runs
 # with a plain `uv sync`; they stay optional for downstream consumers.
-# mujoco-warp serves the mjwarp adapter profile (uni_ray.mjwarp, #300) and
+# mujoco-warp serves the mjwarp adapter profile (uniray.backends.mjwarp, #300) and
 # the benchmarks. motrixsim-core is NOT in the dev group: it ships cp310-only
 # wheels and would break resolution on newer Pythons (see the motrix extra).
 dev = [
@@ -57,8 +57,8 @@ dev = [
 ]
 
 [tool.uv.sources]
-# Local development against the sibling unisim checkout (ray-query contract).
-unisim-core = { path = "../unisim", editable = true }
+# Local development and CI against the vendored unisim contract checkout.
+unisim-core = { path = "third_party/unisim", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -88,5 +88,5 @@ no_site_packages = true
 # which are kernel DSL metadata, not Python type annotations; mypy cannot
 # parse them, so valid-type is disabled for the kernels module only.
 [[tool.mypy.overrides]]
-module = "uni_ray.kernels"
+module = "uniray.kernels"
 disable_error_code = ["valid-type"]
