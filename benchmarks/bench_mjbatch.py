@@ -27,9 +27,9 @@ from collections.abc import Callable
 import numpy as np
 import warp as wp
 
-import uni_ray
-from uni_ray.kernels import trace_rays_batch_bvh_kernel, write_body_poses_kernel
-from uni_ray.mjbatch import build_collision_description
+import uniray
+from uniray.backends.mjbatch import build_collision_description
+from uniray.kernels import trace_rays_batch_bvh_kernel, write_body_poses_kernel
 
 
 def _uv_sphere_mesh_xml(name: str, radius: float, nlat: int = 12, nlon: int = 24) -> str:
@@ -262,7 +262,7 @@ def main() -> None:
           "intersection (ms) | host readback (ms) | update_pose total (ms) | trace total (ms) |")
     print("|---|---|---|---|---|---|---|---|")
     for num_envs, num_rays in ((64, 128), (256, 512), (1024, 512)):
-        caster = uni_ray.create_ray_caster(
+        caster = uniray.create_ray_caster(
             num_envs=num_envs, num_rays=num_rays, collision=collision, device=args.device
         )
         caster.materialize(collision.scene)

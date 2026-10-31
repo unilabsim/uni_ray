@@ -1,4 +1,4 @@
-"""Lifecycle smoke tests for the uni_ray plugin skeleton (#297).
+"""Lifecycle smoke tests for the uniray plugin skeleton (#297).
 
 These use a fake in-memory descriptor and pose inputs; no MuJoCo model is
 involved. Warp itself is required to create the caster and is skipped
@@ -21,8 +21,8 @@ from unisim.ray_query import (
 
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
-import uni_ray  # noqa: E402
-from uni_ray.warp_caster import WarpRayCaster  # noqa: E402
+import uniray  # noqa: E402
+from uniray.warp_caster import WarpRayCaster  # noqa: E402
 
 
 @pytest.fixture()
@@ -39,7 +39,7 @@ def scene() -> RaySceneDescription:
 
 @pytest.fixture()
 def caster(scene: RaySceneDescription):
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=3)
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=3)
     caster.materialize(scene)
     yield caster
     caster.close()
@@ -52,23 +52,23 @@ def _down_rays() -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_factory_entry_point_returns_ray_caster() -> None:
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1)
     assert isinstance(caster, RayCaster)
-    assert caster.caster_type == "uni_ray"
+    assert caster.caster_type == "uniray"
     assert caster.num_envs == 1 and caster.num_rays == 1
     caster.close()
 
 
-def test_unisim_factory_discovers_uni_ray() -> None:
+def test_unisim_factory_discovers_uniray() -> None:
     from unisim.factory import create_ray_caster
 
-    caster = create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+    caster = create_ray_caster("uniray", num_envs=1, num_rays=1)
     assert isinstance(caster, RayCaster)
     caster.close()
 
 
 def test_capabilities_are_declared_honestly() -> None:
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1)
     capabilities = caster.get_ray_capabilities()
     assert capabilities.supports_pose_sync
     assert capabilities.supports_per_env_rays
@@ -123,7 +123,7 @@ def test_lifecycle_smoke(caster, scene: RaySceneDescription) -> None:
 def test_unisim_conformance_helper(caster) -> None:
     from unisim.conformance import assert_ray_caster_conformance
 
-    fresh = uni_ray.create_ray_caster(num_envs=2, num_rays=4)
+    fresh = uniray.create_ray_caster(num_envs=2, num_rays=4)
     try:
         assert_ray_caster_conformance(fresh)
     finally:
@@ -136,7 +136,7 @@ def test_materialize_twice_fails(caster, scene: RaySceneDescription) -> None:
 
 
 def test_trace_before_materialize_fails(scene: RaySceneDescription) -> None:
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1)
     origins, directions = _down_rays()
     with pytest.raises(BackendError, match="materialized"):
         caster.trace(origins[:1], directions[:1], max_distance=1.0)
@@ -164,7 +164,7 @@ def test_mesh_geom_without_collision_descriptor_fails_closed() -> None:
         geom_local_quat=np.array([[1.0, 0.0, 0.0, 0.0]]),
         geom_body_ids=np.array([0]),
     )
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1)
     with pytest.raises(UnsupportedCapabilityError, match="RayCollisionDescription"):
         caster.materialize(mesh_scene)
     caster.close()
@@ -229,6 +229,6 @@ def test_result_buffers_are_reused_views(caster) -> None:
 
 def test_create_validates_batch_shape() -> None:
     with pytest.raises(ValueError, match="positive"):
-        uni_ray.create_ray_caster(num_envs=0, num_rays=1)
+        uniray.create_ray_caster(num_envs=0, num_rays=1)
     with pytest.raises(TypeError, match="integer"):
-        uni_ray.create_ray_caster(num_envs=1.5, num_rays=1)
+        uniray.create_ray_caster(num_envs=1.5, num_rays=1)

@@ -1,6 +1,6 @@
 """mjwarp-profile adapter tests (#300).
 
-The mjwarp adapter (``uni_ray.mjwarp``) sources the collision descriptor from
+The mjwarp adapter (``uniray.backends.mjwarp``) sources the collision descriptor from
 a ``mujoco_warp.Model`` and feeds the shared profile-neutral descriptor build,
 so the caster, pose-sync contract, and kernels are identical to the mjbatch
 profile. These tests pin: the minimal trace through the UniSim plugin
@@ -19,9 +19,9 @@ mujoco = pytest.importorskip("mujoco", reason="mujoco is required to compile the
 mjw = pytest.importorskip("mujoco_warp", reason="mujoco-warp is required for the mjwarp profile")
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import build_collision_description as build_from_mjmodel  # noqa: E402
-from uni_ray.mjwarp import (  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description as build_from_mjmodel  # noqa: E402
+from uniray.backends.mjwarp import (  # noqa: E402
     build_collision_description,
     create_ray_caster,
     rebuild_caster_from_mjwarp,
@@ -143,7 +143,7 @@ def test_minimal_trace_through_plugin_contract() -> None:
 
     from unisim.factory import create_ray_caster as factory_create
 
-    caster = factory_create("uni_ray", num_envs=1, num_rays=3, collision=collision)
+    caster = factory_create("uniray", num_envs=1, num_rays=3, collision=collision)
     assert isinstance(caster, RayCaster)  # no warp/mujoco_warp types leak out
     caster.materialize(collision.scene)
     origins = np.array([[0.0, 0.0, 2.0], [4.0, 4.0, 2.0], [0.0, 0.0, 2.0]])
@@ -176,7 +176,7 @@ def test_trace_parity_with_mjbatch() -> None:
 
     results = []
     for profile_collision in (ref_collision, collision):
-        caster = uni_ray.create_ray_caster(
+        caster = uniray.create_ray_caster(
             num_envs=num_envs, num_rays=origins.shape[0], collision=profile_collision
         )
         caster.materialize(profile_collision.scene)
@@ -273,11 +273,11 @@ def test_device_output_and_dynamic_geometry_fail_closed() -> None:
 
     # The tensor profile is selected through bind_pose_layout, not a legacy
     # creation flag; requesting that legacy flag fails closed.
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
     assert caster.get_ray_capabilities().supports_device_output
     caster.close()
     with pytest.raises(TypeError, match="device_output"):
-        uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision, device_output=True)
+        uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision, device_output=True)
 
     # Dynamic geometry outside the explicit cold-path rebuild has no API:
     # re-materializing a bound caster (geometry change without rebuild) fails.

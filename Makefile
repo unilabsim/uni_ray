@@ -7,7 +7,7 @@ lint:
 	uv run ruff check .
 
 typecheck:
-	uv run mypy src/uni_ray
+	uv run mypy src/uniray
 
 test:
 	uv run pytest -q

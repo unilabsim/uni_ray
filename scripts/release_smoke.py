@@ -15,7 +15,7 @@ scene = unisim.RaySceneDescription(
     body_names=("body",),
 )
 caster = unisim.create_ray_caster(
-    "uni_ray",
+    "uniray",
     num_envs=1,
     num_rays=1,
     device="cpu",

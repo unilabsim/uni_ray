@@ -18,7 +18,7 @@ from unisim.ray_query import (
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 torch = pytest.importorskip("torch", reason="torch is required for the tensor profile")
 
-import uni_ray  # noqa: E402
+import uniray  # noqa: E402
 
 
 def _device() -> str:
@@ -75,7 +75,7 @@ def _mesh_collision() -> RayCollisionDescription:
 
 
 def _bind(collision: RayCollisionDescription) -> Any:
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=1,
         num_rays=1,
         collision=collision,

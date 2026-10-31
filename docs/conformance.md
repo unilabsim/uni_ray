@@ -47,7 +47,7 @@ against a contract-faithful CPU reference (`_cpu_reference` in
 Pinned by `tests/test_known_semantics.py`:
 
 1. **Rays originating inside a primitive** report the forward *exit*
-   distance, matching `mujoco.mj_ray`. uni_ray deliberately deviates from the
+   distance, matching `mujoco.mj_ray`. uniray deliberately deviates from the
    upstream MuJoCo-LiDAR kernels here (they reported 0.0): sphere/box/
    ellipsoid use the far root, and the capsule is intersected as the cylinder
    side plus cap spheres restricted to their exposed hemispheres
@@ -86,7 +86,7 @@ filter/minimum-distance/normal host-tensor parity on a public hfield descriptor.
 
 - **No MuJoCo on the hot path**: in a subprocess, after materialize the
   `mujoco` module is removed from `sys.modules`, blocked on the meta path,
-  and `uni_ray.mjbatch.build_collision_description` is poisoned to raise;
+  and `uniray.backends.mjbatch.build_collision_description` is poisoned to raise;
   a 10-iteration `update_pose`/`trace` loop still succeeds. No `MjData`
   access and no XML parsing can occur.
 - **No descriptor/BVH/mesh rebuilds, no unbounded allocation**: `wp.Bvh` is
@@ -115,7 +115,7 @@ optional-slot disablement.
 ## Hfield support (#2)
 
 Hfield geoms are triangulated once at descriptor build
-(`uni_ray.mjbatch._triangulate_hfield`, top surface ported from
+(`uniray.backends.mjbatch._triangulate_hfield`, top surface ported from
 MuJoCo-LiDAR's `_build_hfield_mesh`) and bound as static meshes, so the
 runtime geom-pose transform applies unchanged. The port is extended into the
 exact closed solid `mj_rayHfield` intersects (mujoco 3.14
@@ -148,7 +148,7 @@ distance, hit, geom ID, and finite unit normals under a static filter and
 
 The contract requires a second `materialize` to fail, so scene replacement
 goes through `WarpRayCaster.rebuild(collision=... | scene=...)`, with
-`uni_ray.mjbatch.rebuild_caster_from_model(caster, mj_model)` as the
+`uniray.backends.mjbatch.rebuild_caster_from_model(caster, mj_model)` as the
 MjModel convenience. Cold-path semantics: all scene-dependent device arrays,
 wp.Mesh objects, and the BVH are reallocated/rebuilt (`num_bodies` and
 `num_geoms` may change); the fixed `(num_envs, num_rays)` batch buffers are

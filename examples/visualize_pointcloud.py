@@ -1,8 +1,8 @@
-"""Visualize uni_ray's ray hit-point cloud with viser.
+"""Visualize uniray's ray hit-point cloud with viser.
 
 Self-contained demo: builds a small scene (ground plane, hfield terrain,
 static tetrahedron mesh, and a freejoint body carrying sphere/box/capsule
-geoms) through ``uni_ray.mjbatch.build_collision_description``, then animates
+geoms) through ``uniray.backends.mjbatch.build_collision_description``, then animates
 a spinning LiDAR-like ring pattern from one sensor origin per env while the
 body oscillates. Each frame's world-frame hit points are pushed to a per-env
 viser point cloud.
@@ -29,8 +29,8 @@ import time
 import numpy as np
 from unisim.ray_query import RayTraceOutputs
 
-import uni_ray
-from uni_ray.mjbatch import build_collision_description
+import uniray
+from uniray.backends.mjbatch import build_collision_description
 
 SCENE_XML = """
 <mujoco>
@@ -220,7 +220,7 @@ def run_demo(
     model = mujoco.MjModel.from_xml_string(SCENE_XML)
     collision = build_collision_description(model)
     scene = collision.scene
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=num_envs, num_rays=num_rays, collision=collision, device=device
     )
     caster.materialize(scene)

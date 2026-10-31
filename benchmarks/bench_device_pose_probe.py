@@ -4,7 +4,7 @@ Lightweight, one-off measurement backing the host pose-sync vs backend-owned
 device-pose evaluation in docs/backends.md. For an mjwarp profile deployment,
 the pose question per frame is:
 
-- uni_ray's phase-1 contract path: host NumPy body poses -> ``update_pose``
+- uniray's phase-1 contract path: host NumPy body poses -> ``update_pose``
   (validation + staging + H2D + pose scatter + AABB + BVH refit), measured
   here end-to-end on the dense scene.
 - the device-pose alternative: ``mujoco_warp.Data.xpos``/``xquat`` already
@@ -33,8 +33,8 @@ import numpy as np
 import warp as wp
 from bench_vs_mjwarp import _build_dense_scene_xml, _poses
 
-import uni_ray
-from uni_ray.mjbatch import build_collision_description
+import uniray
+from uniray.backends.mjbatch import build_collision_description
 
 
 def _mean_ms(fn, device: str, iterations: int) -> float:
@@ -60,7 +60,7 @@ def main() -> None:
     collision = build_collision_description(mjm)
     print(f"device: {device}  iters: {args.iters}  scene: dense ({mjm.nbody} bodies)")
     print()
-    print("| num_envs | mjw xpos+xquat D2H (ms) | uni_ray update_pose (ms) | D2H / update_pose |")
+    print("| num_envs | mjw xpos+xquat D2H (ms) | uniray update_pose (ms) | D2H / update_pose |")
     print("|---|---|---|---|")
     for num_envs in (64, 256, 1024):
         with wp.ScopedDevice(device):
@@ -72,7 +72,7 @@ def main() -> None:
                 wp.copy(xpos_host, d.xpos)
                 wp.copy(xquat_host, d.xquat)
 
-            caster = uni_ray.create_ray_caster(
+            caster = uniray.create_ray_caster(
                 num_envs=num_envs, num_rays=8, collision=collision, device=device
             )
             caster.materialize(collision.scene)

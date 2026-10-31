@@ -15,19 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: uni_ray
+        working-directory: uniray
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          path: uni_ray
-      - name: Check out the pinned UniSim contract
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: unilabsim/unisim
-          ref: v2.2.0
-          path: unisim
+          path: uniray
+          submodules: recursive
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: false
@@ -86,7 +80,7 @@ jobs:
           ]
           expected = [
               "Requires-Dist: numpy",
-              "Requires-Dist: unisim-core>=2.2.0",
+              "Requires-Dist: unisim-core>=2.3.0",
           ]
           assert requires == expected, (requires, expected)
           EOF
@@ -96,7 +90,7 @@ jobs:
         run: |
           uv venv .release-venv
           uv pip install --python .release-venv/bin/python \
-            numpy 'unisim-core==2.2.0' 'warp-lang>=1.11.0'
+            numpy 'unisim-core==2.3.0' 'warp-lang>=1.11.0'
       - name: Install the freshly built source distribution
         run: >-
           uv pip install --python .release-venv/bin/python --reinstall --no-deps
@@ -113,8 +107,8 @@ jobs:
         with:
           name: release-dists
           path: |
-            uni_ray/dist/*.tar.gz
-            uni_ray/dist/*.whl
+            uniray/dist/*.tar.gz
+            uniray/dist/*.whl
           if-no-files-found: error
 
   publish:
@@ -145,16 +139,16 @@ jobs:
       contents: write
     defaults:
       run:
-        working-directory: uni_ray
+        working-directory: uniray
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          path: uni_ray
+          path: uniray
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-dists
-          path: uni_ray/dist
+          path: uniray/dist
       - name: Extract changelog notes
         shell: bash
         run: |

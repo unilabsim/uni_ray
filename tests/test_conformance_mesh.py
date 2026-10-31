@@ -19,8 +19,8 @@ from unisim.ray_query import (  # noqa: E402
     RayTraceOutputs,
 )
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import build_collision_description  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description  # noqa: E402
 
 ATOL = 1e-4
 
@@ -119,7 +119,7 @@ def test_static_mesh_scene_matches_mj_ray() -> None:
     origins = np.concatenate(origins_list)
     directions = np.concatenate(directions_list)
 
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=num_rays, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=num_rays, collision=collision)
     caster.materialize(collision.scene)
     caster_device = caster._device_obj.alias
     try:
@@ -172,7 +172,7 @@ def test_mesh_face_normal_matches_geometric_reference() -> None:
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=1, collision=collision)
     caster.materialize(collision.scene)
     try:
         centroid = np.array([1.0, 1.0, 1.0]) / 3.0

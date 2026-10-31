@@ -14,8 +14,8 @@ from unisim.ray_query import RayTraceOutputs
 mujoco = pytest.importorskip("mujoco", reason="mujoco is required for the mjbatch caster tests")
 wp = pytest.importorskip("warp", reason="warp-lang is required to create the caster")
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import build_collision_description  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description  # noqa: E402
 
 SCENE_XML = """
 <mujoco>
@@ -70,7 +70,7 @@ def model_and_data():
 def caster(model_and_data):
     model, _ = model_and_data
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=2, num_rays=RAY_ORIGINS.shape[0], collision=collision
     )
     caster.materialize(collision.scene)

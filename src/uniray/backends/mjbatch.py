@@ -1,16 +1,16 @@
 """Cold-path ``mujoco.MjModel`` → collision descriptor builder.
 
-This module is the only place uni_ray touches MuJoCo, and it does so exactly
+This module is the only place uniray touches MuJoCo, and it does so exactly
 once per scene: it reads geom types, sizes, local poses, body ids, and static
 mesh vertex/face data out of an ``MjModel`` and freezes them into the
 backend-neutral :class:`unisim.ray_query.RayCollisionDescription` consumed by
-``uni_ray.create_ray_caster(..., collision=...)``. The ``mujoco`` import is
+``uniray.create_ray_caster(..., collision=...)``. The ``mujoco`` import is
 lazy and confined to this module; the hot path (``update_pose``/``trace``)
 never sees an ``MjModel`` or ``MjData``.
 
 The extraction is split into a plain-NumPy snapshot (:class:`_ModelSceneData`)
 and a profile-neutral descriptor build (``_build_collision_description``) so
-``uni_ray.mjwarp`` can feed the same build from a ``mujoco_warp.Model``
+``uniray.backends.mjwarp`` can feed the same build from a ``mujoco_warp.Model``
 without going through an ``MjModel``.
 
 The MjModel extraction mirrors the init-time cold path of MuJoCo-LiDAR's
@@ -83,7 +83,7 @@ class _ModelSceneData:
     """Plain-NumPy snapshot of the model fields the descriptor build reads.
 
     Shared extraction target: ``_scene_data_from_mjmodel`` fills it from a
-    ``mujoco.MjModel`` and ``uni_ray.mjwarp`` fills it from a
+    ``mujoco.MjModel`` and ``uniray.backends.mjwarp`` fills it from a
     ``mujoco_warp.Model``, so the descriptor build below is profile-neutral.
     """
 
@@ -119,7 +119,7 @@ def build_collision_description(mj_model: Any) -> RayCollisionDescription:
         import mujoco
     except ImportError as error:
         raise OptionalDependencyError(
-            "uni_ray.mjbatch requires the optional dependency 'mujoco>=3.2.0', "
+            "uniray.backends.mjbatch requires the optional dependency 'mujoco>=3.2.0', "
             "which is not installed; install the 'uni-ray[mujoco]' extra to build "
             "collision descriptors from an MjModel"
         ) from error
@@ -157,7 +157,7 @@ def _build_collision_description(data: _ModelSceneData) -> RayCollisionDescripti
     unknown = sorted(set(data.geom_type_codes.tolist()) - set(_MJ_TO_CONTRACT_TYPES))
     if unknown:
         raise UnsupportedCapabilityError(
-            f"uni_ray does not support MuJoCo geom type codes {unknown}; "
+            f"uniray does not support MuJoCo geom type codes {unknown}; "
             "supported geoms are plane, hfield (triangulated), sphere, capsule, "
             "ellipsoid, cylinder, box, and static mesh"
         )
@@ -374,7 +374,7 @@ def rebuild_caster_from_model(caster: Any, mj_model: Any) -> RayCollisionDescrip
     mj_model))``; returns the rebuilt descriptor. Never invoked by
     ``update_pose``/``trace`` — the hot path only accepts body poses.
     """
-    from .warp_caster import WarpRayCaster
+    from ..warp_caster import WarpRayCaster
 
     if not isinstance(caster, WarpRayCaster):
         raise TypeError(f"caster must be a WarpRayCaster, got {type(caster).__name__}")

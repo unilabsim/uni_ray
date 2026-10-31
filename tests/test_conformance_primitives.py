@@ -17,8 +17,8 @@ wp = pytest.importorskip("warp", reason="warp-lang is required for the conforman
 
 from unisim.ray_query import RayTraceOutputs  # noqa: E402
 
-import uni_ray  # noqa: E402
-from uni_ray.mjbatch import build_collision_description  # noqa: E402
+import uniray  # noqa: E402
+from uniray.backends.mjbatch import build_collision_description  # noqa: E402
 
 ATOL = 1e-4
 
@@ -182,7 +182,7 @@ def test_primitive_sweep_matches_mj_ray_over_random_poses() -> None:
     model = mujoco.MjModel.from_xml_string(SWEEP_XML)
     data = mujoco.MjData(model)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=2, num_rays=512, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=2, num_rays=512, collision=collision)
     caster.materialize(collision.scene)
     try:
         rng = np.random.default_rng(299)
@@ -221,7 +221,7 @@ def test_capsule_cylinder_rotated_axis_matches_cpu_2000_rays() -> None:
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     collision = build_collision_description(model)
-    caster = uni_ray.create_ray_caster(num_envs=1, num_rays=2000, collision=collision)
+    caster = uniray.create_ray_caster(num_envs=1, num_rays=2000, collision=collision)
     caster.materialize(collision.scene)
     try:
         caster.update_pose(data.xpos[None], data.xquat[None])

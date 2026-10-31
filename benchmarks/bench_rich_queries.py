@@ -36,8 +36,8 @@ from bench_mjbatch import _hfield_xml, _uv_sphere_mesh_xml
 from unisim.backend.ray_scene import ray_collision_from_mujoco_model
 from unisim.ray_query import RayPoseTensorView, RayTraceFilter, RayTraceOutputs
 
-import uni_ray
-from uni_ray.kernels import trace_rays_batch_bvh_kernel
+import uniray
+from uniray.kernels import trace_rays_batch_bvh_kernel
 
 MAX_DISTANCE = 10.0
 MIN_DISTANCE = 0.1
@@ -143,7 +143,7 @@ def _profile(
 ) -> tuple[object, ...]:
     model = mujoco.MjModel.from_xml_string(xml)
     collision = ray_collision_from_mujoco_model(model)
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=num_envs,
         num_rays=num_rays,
         collision=collision,

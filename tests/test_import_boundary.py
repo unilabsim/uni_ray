@@ -1,4 +1,4 @@
-"""Import-boundary tests: uni_ray must import and fail closed without warp/mujoco.
+"""Import-boundary tests: uniray must import and fail closed without warp/mujoco.
 
 Each check runs in a fresh subprocess with a meta-path blocker that makes
 ``warp`` and ``mujoco`` unimportable, mirroring an environment where the
@@ -28,7 +28,7 @@ sys.meta_path.insert(0, _Blocker())
 """
 
 # Variant that blocks only mujoco_warp (#300): the mjwarp adapter module must
-# import and fail closed without it, and uni_ray/factory discovery must be
+# import and fail closed without it, and uniray/factory discovery must be
 # unaffected.
 BLOCKER_MJWARP = """
 import sys
@@ -45,7 +45,7 @@ sys.meta_path.insert(0, _Blocker())
 """
 
 # Variant that blocks only motrixsim (#301): the motrix adapter module must
-# import and fail closed without it, and uni_ray/factory discovery must be
+# import and fail closed without it, and uniray/factory discovery must be
 # unaffected.
 BLOCKER_MOTRIX = """
 import sys
@@ -71,17 +71,17 @@ def _run(code: str, blocker: str = BLOCKER) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_import_uni_ray_without_optional_runtimes() -> None:
+def test_import_uniray_without_optional_runtimes() -> None:
     result = _run(
         """
         import sys
 
-        import uni_ray
+        import uniray
 
         assert "warp" not in sys.modules
         assert "mujoco" not in sys.modules
-        assert callable(uni_ray.create_ray_caster)
-        import uni_ray.mjbatch
+        assert callable(uniray.create_ray_caster)
+        import uniray.backends.mjbatch
 
         print("import-ok")
         """
@@ -95,10 +95,10 @@ def test_caster_creation_fails_closed_without_warp() -> None:
         """
         from unisim.optional import OptionalDependencyError
 
-        import uni_ray
+        import uniray
 
         try:
-            uni_ray.create_ray_caster(num_envs=1, num_rays=1)
+            uniray.create_ray_caster(num_envs=1, num_rays=1)
         except OptionalDependencyError as error:
             assert "warp-lang" in str(error), str(error)
             print("fail-closed-ok")
@@ -117,7 +117,7 @@ def test_unisim_factory_discovery_fails_closed_without_warp() -> None:
         from unisim.optional import OptionalDependencyError
 
         try:
-            create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+            create_ray_caster("uniray", num_envs=1, num_rays=1)
         except OptionalDependencyError as error:
             assert "warp-lang" in str(error), str(error)
             print("factory-fail-closed-ok")
@@ -134,7 +134,7 @@ def test_mjbatch_builder_fails_closed_without_mujoco() -> None:
         """
         from unisim.optional import OptionalDependencyError
 
-        from uni_ray.mjbatch import build_collision_description
+        from uniray.backends.mjbatch import build_collision_description
 
         try:
             build_collision_description(object())
@@ -154,13 +154,13 @@ def test_mjwarp_module_imports_and_factory_works_without_mujoco_warp() -> None:
         """
         import sys
 
-        import uni_ray
-        import uni_ray.mjwarp
+        import uniray
+        import uniray.backends.mjwarp
 
         assert "mujoco_warp" not in sys.modules
         from unisim.factory import create_ray_caster
 
-        caster = create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+        caster = create_ray_caster("uniray", num_envs=1, num_rays=1)
         caster.close()
         print("import-and-factory-ok")
         """,
@@ -175,7 +175,7 @@ def test_mjwarp_builder_fails_closed_without_mujoco_warp() -> None:
         """
         from unisim.optional import OptionalDependencyError
 
-        from uni_ray.mjwarp import build_collision_description
+        from uniray.backends.mjwarp import build_collision_description
 
         try:
             build_collision_description(object())
@@ -198,13 +198,13 @@ def test_motrix_module_imports_and_factory_works_without_motrixsim() -> None:
         """
         import sys
 
-        import uni_ray
-        import uni_ray.motrix
+        import uniray
+        import uniray.backends.motrix
 
         assert "motrixsim" not in sys.modules
         from unisim.factory import create_ray_caster
 
-        caster = create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+        caster = create_ray_caster("uniray", num_envs=1, num_rays=1)
         caster.close()
         print("import-and-factory-ok")
         """,
@@ -219,7 +219,7 @@ def test_motrix_builder_fails_closed_without_motrixsim() -> None:
         """
         from unisim.optional import OptionalDependencyError
 
-        from uni_ray.motrix import build_collision_description
+        from uniray.backends.motrix import build_collision_description
 
         try:
             build_collision_description(object())

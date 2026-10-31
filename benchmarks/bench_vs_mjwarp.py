@@ -1,6 +1,6 @@
-"""Batch ray-tracing benchmark: uni_ray vs mujoco-warp (#300 input).
+"""Batch ray-tracing benchmark: uniray vs mujoco-warp (#300 input).
 
-Compares uni_ray's mjbatch Warp ray caster against mujoco-warp's public batch
+Compares uniray's mjbatch Warp ray caster against mujoco-warp's public batch
 ray API (``mujoco_warp.rays``) on identical scenes, geom poses, and ray
 batches, sweeping (num_envs x num_rays). mujoco-warp is measured in two modes:
 
@@ -9,27 +9,27 @@ batches, sweeping (num_envs x num_rays). mujoco-warp is measured in two modes:
 - BVH: ``rays(..., rc=rc)`` with a ``RenderContext`` from
   ``create_render_context``; the scene BVH is rebuilt per iteration with the
   public ``refit_bvh`` so dynamic poses are reflected (same lifecycle as
-  uni_ray's update_pose refit).
+  uniray's update_pose refit).
 
 Scenes (select with --scenes; all run by default):
 
 - standard: plane + static UV-sphere mesh + one freejoint body with five
   primitive geoms (7 geoms total).
 - dense: 4x3 grid of freejoint bodies with four primitives each (50 geoms).
-- hfield: 33x33 elevation-grid hfield terrain (triangulated by uni_ray into a
+- hfield: 33x33 elevation-grid hfield terrain (triangulated by uniray into a
   closed solid: ~2.2k triangles) + static mesh + the standard primitive body.
   mujoco-warp's BVH mode (RenderContext) only covers the hfield top surface —
-  side/base rays that uni_ray and the brute mode resolve against the closed
+  side/base rays that uniray and the brute mode resolve against the closed
   solid are missed — so the hfield scene times mujoco-warp in brute mode only;
   the sanity check still reports the BVH divergence as a capability finding.
 - densemesh: 24 mesh geoms sharing one ~2208-triangle UV-sphere asset
   (8 freejoint bodies x 3 geoms) + plane, exercising the mesh-heavy case for
-  both mujoco-warp modes and uni_ray's static-mesh BVH path.
+  both mujoco-warp modes and uniray's static-mesh BVH path.
 
 What is measured per iteration on each side (device work only, warp
 synchronize-scoped wall time, mean over --iters):
 
-- uni_ray: ``update_pose`` (public API: validation + staging + H2D + pose
+- uniray: ``update_pose`` (public API: validation + staging + H2D + pose
   scatter + AABB + BVH refit), ``trace`` (public API: validation + staging +
   H2D rays + kernel + D2H readback), and the intersection kernel alone (same
   internals segment as bench_mjbatch).
@@ -39,16 +39,16 @@ synchronize-scoped wall time, mean over --iters):
 
 Fairness notes (also in docs/benchmark-mjwarp.md):
 
-- mujoco-warp's ``rays`` kernel always computes hit normals; uni_ray does not
+- mujoco-warp's ``rays`` kernel always computes hit normals; uniray does not
   compute normals at all. This inflates the mujoco-warp kernel slightly.
-- mujoco-warp has no max_distance cutoff; uni_ray prunes at max_distance
+- mujoco-warp has no max_distance cutoff; uniray prunes at max_distance
   (10.0 here) inside its kernel.
-- uni_ray's public ``trace`` performs contract-mandated host validation and
+- uniray's public ``trace`` performs contract-mandated host validation and
   staging that the raw mujoco-warp calls skip; the kernel-only columns are the
   like-for-like ray-throughput comparison.
 - mujoco-warp planes are single-sided (mj_ray semantics); the contract plane
-  uni_ray implements is double-sided. Rays approaching the plane from below
-  therefore hit on uni_ray and miss (or hit a geom beyond) on mujoco-warp;
+  uniray implements is double-sided. Rays approaching the plane from below
+  therefore hit on uniray and miss (or hit a geom beyond) on mujoco-warp;
   the sanity check reports those as expected mismatches.
 
 A correctness sanity check (8 envs x 64 rays, same inputs both sides) runs
@@ -79,8 +79,8 @@ from bench_mjbatch import (
 from mujoco_warp._src.types import vec6
 from unisim.ray_query import RayTraceOutputs
 
-import uni_ray
-from uni_ray.mjbatch import build_collision_description
+import uniray
+from uniray.backends.mjbatch import build_collision_description
 
 MAX_DISTANCE = 10.0
 SHAPES = ((64, 128), (256, 512), (1024, 512))
@@ -310,7 +310,7 @@ def _mean_ms(fn, device: str, iterations: int) -> float:
 
 
 def _sanity_check(scene: _Scene, device: str) -> None:
-    """Verify uni_ray and mujoco-warp agree on identical inputs (small config)."""
+    """Verify uniray and mujoco-warp agree on identical inputs (small config)."""
     num_envs, num_rays = 8, 64
     mjm = mujoco.MjModel.from_xml_string(scene.xml_fn())
     collision = build_collision_description(mjm)
@@ -318,7 +318,7 @@ def _sanity_check(scene: _Scene, device: str) -> None:
     body_pos, body_quat = _poses(rng, num_envs, mjm.nbody)
     origins, directions = scene.rays_fn(rng, num_rays)
 
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=num_envs, num_rays=num_rays, collision=collision, device=device
     )
     caster.materialize(collision.scene)
@@ -377,7 +377,7 @@ def _sanity_check(scene: _Scene, device: str) -> None:
                     "    note: mujoco-warp BVH (RenderContext) covers only the hfield top "
                     "surface; side/base rays are missed by BVH mode and below-base rays hit "
                     "the top from underneath (capability finding — the distance check is "
-                    "informational for this mode; brute mode matches uni_ray exactly)"
+                    "informational for this mode; brute mode matches uniray exactly)"
                 )
         if use_bvh and not scene.mjwarp_bvh:
             continue  # documented BVH capability divergence; brute carries the hard check
@@ -391,7 +391,7 @@ def _run_shape(
     body_pos, body_quat = _poses(rng, num_envs, mjm.nbody)
     origins, directions = scene.rays_fn(rng, num_rays)
 
-    caster = uni_ray.create_ray_caster(
+    caster = uniray.create_ray_caster(
         num_envs=num_envs, num_rays=num_rays, collision=collision, device=device
     )
     caster.materialize(collision.scene)
@@ -474,7 +474,7 @@ def main() -> None:
                     )
                 )
         print(
-            "\n| num_envs | num_rays | uni_ray update_pose (ms) | uni_ray trace (ms) | "
+            "\n| num_envs | num_rays | uniray update_pose (ms) | uniray trace (ms) | "
             "mjw brute pose (ms) | mjw brute trace (ms) | mjw bvh pose+refit (ms) | "
             "mjw bvh trace (ms) | speedup vs brute | speedup vs bvh |"
         )
@@ -490,8 +490,8 @@ def main() -> None:
                 f"{speedup_bvh} |"
             )
         print(
-            "\n| num_envs | num_rays | uni_ray kernel (ms) | mjw brute kernel (ms) | "
-            "mjw bvh kernel (ms) | kernel ratio brute/uni_ray | kernel ratio bvh/uni_ray |"
+            "\n| num_envs | num_rays | uniray kernel (ms) | mjw brute kernel (ms) | "
+            "mjw bvh kernel (ms) | kernel ratio brute/uniray | kernel ratio bvh/uniray |"
         )
         print("|---|---|---|---|---|---|---|")
         for num_envs, num_rays, r in rows:
